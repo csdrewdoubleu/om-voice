@@ -20,9 +20,11 @@ export const HARD_CAP_SECONDS = 7 * 60;
 export const REQUIRED_ONLY_SECONDS = 5 * 60;
 export const FORCE_WRAP_SECONDS = 6 * 60 + 30;
 
+export type FinishReason = "complete" | "dropped" | "capped" | "early" | "voice_early";
+
 interface Options {
   firstName: string;
-  onFinish: (reason: "complete" | "dropped" | "capped" | "early") => void;
+  onFinish: (reason: FinishReason) => void;
 }
 
 interface RecordArgs {
@@ -57,9 +59,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const fieldsRef = useRef<OperatingMap>({ first_name: firstName });
   const currentSectionRef = useRef<string>("about");
   const endingRef = useRef(false);
+  const endReasonRef = useRef<FinishReason>("complete");
+  const responseActiveRef = useRef(false);
+  const pendingCreateRef = useRef(false);
 
   const finish = useCallback(
-    (reason: "complete" | "dropped" | "capped" | "early") => {
+    (reason: FinishReason) => {
       if (finishedRef.current) return;
       finishedRef.current = true;
       teardown();
@@ -189,25 +194,46 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     );
   }, []);
 
-  const sendToolResult = useCallback((callId: string, output: unknown) => {
+  const requestResponse = useCallback(() => {
     const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    dc.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(output),
-        },
-      }),
-    );
+    if (!dc || dc.readyState !== "open" || endingRef.current) return;
+    // A response.create during an active response is rejected, so queue it.
+    if (responseActiveRef.current) {
+      pendingCreateRef.current = true;
+      return;
+    }
+    pendingCreateRef.current = false;
     dc.send(JSON.stringify({ type: "response.create" }));
   }, []);
+
+  const sendToolResult = useCallback(
+    (callId: string, output: unknown) => {
+      const dc = dcRef.current;
+      if (!dc || dc.readyState !== "open") return;
+      dc.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(output),
+          },
+        }),
+      );
+      requestResponse();
+    },
+    [requestResponse],
+  );
 
   const handleServerEvent = useCallback(
     (event: Record<string, unknown>) => {
       const type = event["type"];
+
+      if (type === "response.created") responseActiveRef.current = true;
+      if (type === "response.done" || type === "response.cancelled") {
+        responseActiveRef.current = false;
+        if (pendingCreateRef.current) requestResponse();
+      }
 
       if (type === "input_audio_buffer.speech_started") setSpeaker("person");
       if (type === "input_audio_buffer.speech_stopped") setSpeaker("idle");
@@ -216,7 +242,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       if (type === "output_audio_buffer.stopped" || type === "response.output_audio.done") {
         setSpeaker("idle");
         if (endingRef.current && type === "output_audio_buffer.stopped") {
-          window.setTimeout(() => finishRef.current("complete"), 600);
+          const reason = endReasonRef.current;
+          window.setTimeout(() => finishRef.current(reason), 300);
         }
       }
 
@@ -244,9 +271,17 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       }
 
       if (!callId || handledCallsRef.current.has(callId)) return;
-      if (name === "end_interview") {
+      if (name === "finish_session") {
         handledCallsRef.current.add(callId);
+        let reason = "complete";
+        try {
+          reason = (JSON.parse(argsText || "{}") as { reason?: string }).reason ?? "complete";
+        } catch {
+          /* default to complete */
+        }
+        endReasonRef.current = reason === "person_requested" ? "voice_early" : "complete";
         endingRef.current = true;
+        pendingCreateRef.current = false;
         const dc = dcRef.current;
         if (dc && dc.readyState === "open") {
           dc.send(
@@ -256,8 +291,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
             }),
           );
         }
-        // Let the goodbye finish playing, with a fallback.
-        window.setTimeout(() => finishRef.current("complete"), 8000);
+        // Wait for the closing audio to finish playing; fall back after 8 seconds.
+        const fallbackReason = endReasonRef.current;
+        window.setTimeout(() => finishRef.current(fallbackReason), 8000);
         return;
       }
       if (name !== "record_answers") return;
