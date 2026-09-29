@@ -196,12 +196,12 @@ function Index() {
 
   const buildExport = (): SessionExport => ({
     session_id: sessionId,
-    first_name: firstName || reviewFields.first_name || "",
+    first_name: reviewFields.first_name || firstName || "",
     started_at: new Date(startedAtRef.current).toISOString(),
     ended_at: new Date(endedAtRef.current ?? Date.now()).toISOString(),
     duration_seconds: durationSeconds,
     ended_by: endedBy,
-    fields: fullFields(reviewFields, firstName),
+    fields: fullFields(reviewFields, reviewFields.first_name || firstName),
     confidence: fullKeyed(reviewConfidence),
     quotes: fullKeyed(reviewQuotes as Partial<Record<string, string>>),
     edited_fields: edited,
