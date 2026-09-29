@@ -21,10 +21,12 @@ export type Database = {
           duration_seconds: number | null
           edited_fields: string[]
           ended_at: string | null
+          ended_by: string | null
           fields: Json
           first_name: string | null
           id: string
           quotes: Json
+          sections_completed: string[]
           started_at: string | null
         }
         Insert: {
@@ -33,10 +35,12 @@ export type Database = {
           duration_seconds?: number | null
           edited_fields?: string[]
           ended_at?: string | null
+          ended_by?: string | null
           fields?: Json
           first_name?: string | null
           id?: string
           quotes?: Json
+          sections_completed?: string[]
           started_at?: string | null
         }
         Update: {
@@ -45,10 +49,12 @@ export type Database = {
           duration_seconds?: number | null
           edited_fields?: string[]
           ended_at?: string | null
+          ended_by?: string | null
           fields?: Json
           first_name?: string | null
           id?: string
           quotes?: Json
+          sections_completed?: string[]
           started_at?: string | null
         }
         Relationships: []
