@@ -1,7 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
-import { buildSystemPrompt, END_INTERVIEW_TOOL, RECORD_ANSWERS_TOOL } from "./prompt";
+import { buildSystemPrompt, FINISH_SESSION_TOOL, RECORD_ANSWERS_TOOL } from "./prompt";
 
 const DAILY_SESSION_CAP = 40;
+
+// Tunables. Semantic turn detection at medium eagerness is preferred.
+// Fallback option: { type: "server_vad", silence_duration_ms: 700, threshold: 0.5, prefix_padding_ms: 300 }
+const TURN_DETECTION = { type: "semantic_vad", eagerness: "medium" } as const;
+const VOICE = "cedar";
+const SPEECH_SPEED = 0.95;
 
 export interface RealtimeSessionResult {
   ok: boolean;
@@ -53,10 +59,10 @@ export const createRealtimeSession = createServerFn({ method: "POST" })
           model,
           instructions: buildSystemPrompt(data.firstName),
           audio: {
-            input: { turn_detection: { type: "semantic_vad" } },
-            output: { voice: "cedar" },
+            input: { turn_detection: TURN_DETECTION },
+            output: { voice: VOICE, speed: SPEECH_SPEED },
           },
-          tools: [RECORD_ANSWERS_TOOL, END_INTERVIEW_TOOL],
+          tools: [RECORD_ANSWERS_TOOL, FINISH_SESSION_TOOL],
           tool_choice: "auto",
         },
       }),

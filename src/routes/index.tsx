@@ -21,6 +21,7 @@ import {
 const REASON_TO_ENDED_BY: Record<string, EndedBy> = {
   complete: "wrap",
   early: "finish_early",
+  voice_early: "finish_early_voice",
   capped: "cap",
   dropped: "dropped",
 };
@@ -81,7 +82,7 @@ function Index() {
   const [endedBy, setEndedBy] = useState<EndedBy>("dropped");
 
   const handleFinish = useCallback(
-    (reason: "complete" | "dropped" | "capped" | "early") => {
+    (reason: "complete" | "dropped" | "capped" | "early" | "voice_early") => {
       endedAtRef.current = Date.now();
       setEndedBy(REASON_TO_ENDED_BY[reason] ?? "dropped");
       setBanner(reason === "dropped" ? "The call dropped; here's what we got." : null);
