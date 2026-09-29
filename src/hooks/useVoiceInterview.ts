@@ -276,7 +276,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
 
       const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
-        body: offer.sdp,
+        body: offer.sdp ?? "",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/sdp",

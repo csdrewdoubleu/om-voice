@@ -7,7 +7,7 @@ export interface RealtimeSessionResult {
   ok: boolean;
   error?: string;
   value?: string;
-  expires_at?: number;
+  expires_at?: number | undefined;
   model?: string;
 }
 
