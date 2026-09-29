@@ -382,7 +382,7 @@ export function fullFields(map: OperatingMap, firstName: string): Record<string,
   const out: Record<string, unknown> = { first_name: firstName || map.first_name || null };
   for (const k of ALL_FIELDS) {
     if (k === "scores") {
-      out.scores = Object.fromEntries(SCORE_KEYS.map((d) => [d, map.scores?.[d] ?? null]));
+      out["scores"] = Object.fromEntries(SCORE_KEYS.map((d) => [d, map.scores?.[d] ?? null]));
     } else {
       const v = map[k];
       out[k] = v === undefined || v === "" ? null : v;
