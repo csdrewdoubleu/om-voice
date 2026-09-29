@@ -34,7 +34,8 @@ interface Props {
 function isEmpty(key: FieldKey, value: unknown) {
   if (value === undefined || value === null || value === "") return true;
   if (Array.isArray(value)) return value.length === 0;
-  if (key === "scores") return Object.keys((value ?? {}) as object).length === 0;
+  if (key === "scores")
+    return SCORE_KEYS.some((d) => typeof (value as Record<string, unknown>)[d] !== "number");
   return false;
 }
 

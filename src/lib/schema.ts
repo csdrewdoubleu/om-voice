@@ -45,7 +45,30 @@ export const TOOL_CATALOG = [
   "Dropbox",
   "Box",
   "SharePoint",
+  "Google Sheets",
+  "Google Ads",
+  "Microsoft Excel",
+  "Zoom",
+  "Google Meet",
+  "Airtable",
+  "Canva",
+  "Meta Ads",
 ] as const;
+
+export const TOOL_ALIASES: Record<string, string> = {
+  sheets: "Google Sheets",
+  "google sheet": "Google Sheets",
+  excel: "Microsoft Excel",
+  meet: "Google Meet",
+  teams: "Microsoft Teams",
+  "facebook ads": "Meta Ads",
+  "instagram ads": "Meta Ads",
+  "adwords": "Google Ads",
+  docs: "Google Docs",
+  drive: "Google Drive",
+  "monday.com": "Monday",
+  quickbooks: "QuickBooks",
+};
 
 export const REKEY_HOURS = ["0", "1-2", "3-5", "6-10", "10+"] as const;
 
@@ -264,7 +287,9 @@ export function normaliseTool(name: string): string {
     const match = TOOL_CATALOG.find((t) => t.toLowerCase() === rest.toLowerCase());
     return match ?? `Other: ${rest}`;
   }
-  const match = TOOL_CATALOG.find((t) => t.toLowerCase() === trimmed.toLowerCase());
+  const match =
+    TOOL_CATALOG.find((t) => t.toLowerCase() === trimmed.toLowerCase()) ??
+    TOOL_ALIASES[trimmed.toLowerCase()];
   return match ?? `Other: ${trimmed}`;
 }
 
@@ -287,4 +312,85 @@ export function formatChip(key: FieldKey, value: unknown): string | null {
 
 export function emptyMap(firstName: string): OperatingMap {
   return { first_name: firstName, tools: [], scores: {} };
+}
+
+export const OPTIONAL_FIELDS: FieldKey[] = [
+  "ai_usage_level",
+  "waits_on",
+  "waited_on_by",
+  "annoying_task",
+  "rekey_pair",
+  "hours_window",
+  "hard_rule",
+];
+
+/** Required keys; scores are expanded into scores.<dimension>. */
+export const REQUIRED_KEYS: string[] = ALL_FIELDS.filter((k) => !OPTIONAL_FIELDS.includes(k)).flatMap(
+  (k) => (k === "scores" ? SCORE_KEYS.map((d) => `scores.${d}`) : [k]),
+);
+
+export function isCaptured(map: OperatingMap, key: string): boolean {
+  if (key.startsWith("scores.")) {
+    const d = key.slice(7) as ScoreKey;
+    return typeof map.scores?.[d] === "number";
+  }
+  if (key === "scores") return SCORE_KEYS.every((d) => typeof map.scores?.[d] === "number");
+  const v = map[key as FieldKey];
+  if (v === undefined || v === "") return false;
+  if (key === "tools") return Array.isArray(v) && v.length > 0;
+  return true; // explicit null counts as answered for optional nullable fields
+}
+
+export function sectionKeys(section: Section): string[] {
+  return section.fields.flatMap((k) =>
+    k === "scores" ? SCORE_KEYS.map((d) => `scores.${d}`) : [k],
+  );
+}
+
+export function missingInSection(map: OperatingMap, sectionId: string): string[] {
+  const section = SECTIONS.find((s) => s.id === sectionId);
+  return section ? sectionKeys(section).filter((k) => !isCaptured(map, k)) : [];
+}
+
+export function missingRequired(map: OperatingMap): string[] {
+  return REQUIRED_KEYS.filter((k) => !isCaptured(map, k));
+}
+
+export function sectionOf(key: string): string | undefined {
+  const base = key.startsWith("scores.") ? "scores" : key;
+  return SECTIONS.find((s) => s.fields.includes(base as FieldKey))?.id;
+}
+
+export type EndedBy = "wrap" | "finish_early" | "cap" | "dropped";
+
+export interface SessionExport {
+  session_id: string;
+  first_name: string;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+  ended_by: EndedBy;
+  fields: Record<string, unknown>;
+  confidence: Record<string, unknown>;
+  quotes: Record<string, string | null>;
+  edited_fields: string[];
+  sections_completed: string[];
+}
+
+/** Every schema key present; null where nothing was captured. Scores always carry all six dimensions. */
+export function fullFields(map: OperatingMap, firstName: string): Record<string, unknown> {
+  const out: Record<string, unknown> = { first_name: firstName || map.first_name || null };
+  for (const k of ALL_FIELDS) {
+    if (k === "scores") {
+      out.scores = Object.fromEntries(SCORE_KEYS.map((d) => [d, map.scores?.[d] ?? null]));
+    } else {
+      const v = map[k];
+      out[k] = v === undefined || v === "" ? null : v;
+    }
+  }
+  return out;
+}
+
+export function fullKeyed<T>(obj: Partial<Record<string, T>>): Record<string, T | null> {
+  return Object.fromEntries(ALL_FIELDS.map((k) => [k, obj[k] ?? null]));
 }
