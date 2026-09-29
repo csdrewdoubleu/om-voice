@@ -1,0 +1,290 @@
+export const FUNCTIONS = [
+  "Leadership",
+  "Operations",
+  "Sales",
+  "Marketing",
+  "Product & Engineering",
+  "Finance & Admin",
+  "Client service",
+  "Other",
+] as const;
+
+export const SENIORITIES = [
+  "Founder or partner",
+  "Lead or manager",
+  "Individual contributor",
+] as const;
+
+export const TENURE_BANDS = ["Under 1 year", "1-3 years", "3-7 years", "7+ years"] as const;
+
+export const WORK_MODES = ["Onsite", "Hybrid", "Remote"] as const;
+
+export const TOOL_CATALOG = [
+  "Gmail",
+  "Outlook",
+  "Slack",
+  "Microsoft Teams",
+  "Google Docs",
+  "Microsoft 365",
+  "Notion",
+  "Asana",
+  "Trello",
+  "Monday",
+  "ClickUp",
+  "Jira",
+  "Linear",
+  "HubSpot",
+  "Salesforce",
+  "Pipedrive",
+  "QuickBooks",
+  "Xero",
+  "Stripe",
+  "Calendly",
+  "Google Calendar",
+  "Google Drive",
+  "Dropbox",
+  "Box",
+  "SharePoint",
+] as const;
+
+export const REKEY_HOURS = ["0", "1-2", "3-5", "6-10", "10+"] as const;
+
+export const CHANNELS = [
+  "Email",
+  "Slack or Teams",
+  "Text message",
+  "Phone call",
+  "In person",
+] as const;
+
+export const SCORE_VALUES = [0, 25, 50, 75, 100] as const;
+
+export const SCORE_KEYS = [
+  "async",
+  "collaborative",
+  "improviser",
+  "deliberate",
+  "interrupt_averse",
+  "process_skipper",
+] as const;
+
+export type ScoreKey = (typeof SCORE_KEYS)[number];
+
+export const SCORE_POLES: Record<ScoreKey, { label: string; low: string; high: string }> = {
+  async: {
+    label: "Async",
+    low: "I'd rather hop on a call",
+    high: "Send it to me in writing",
+  },
+  collaborative: {
+    label: "Collaborative",
+    low: "I do my best work alone",
+    high: "I do my best work with people around",
+  },
+  improviser: {
+    label: "Improviser",
+    low: "I plan the week on Monday",
+    high: "I figure it out as it comes",
+  },
+  deliberate: {
+    label: "Deliberate",
+    low: "I decide fast and adjust",
+    high: "I decide once I've seen everything",
+  },
+  interrupt_averse: {
+    label: "Interrupt averse",
+    low: "Interrupt me any time",
+    high: "Protect my focus, batch it up",
+  },
+  process_skipper: {
+    label: "Process skipper",
+    low: "I build the checklist",
+    high: "I skip the checklist",
+  },
+};
+
+export const AI_USAGE_LABELS = [
+  "Never",
+  "Tried it",
+  "Sometimes",
+  "Weekly for real work",
+  "Daily for real work",
+];
+
+export type Scores = Partial<Record<ScoreKey, number>>;
+
+export interface OperatingMap {
+  first_name?: string;
+  role_title?: string;
+  function?: string;
+  seniority?: string;
+  tenure_band?: string;
+  work_mode?: string;
+  tools?: string[];
+  rekey_pair?: [string, string] | null;
+  rekey_hours?: string;
+  channel_routine?: string;
+  channel_sameday?: string;
+  channel_urgent?: string;
+  hours_window?: string;
+  hard_rule?: string | null;
+  scores?: Scores;
+  ai_usage_level?: number;
+  waits_on?: string | null;
+  waited_on_by?: string | null;
+  annoying_task?: string | null;
+}
+
+export type FieldKey = keyof OperatingMap;
+
+export type Confidence = Partial<Record<FieldKey, "high" | "low">>;
+export type Quotes = Partial<Record<string, string>>;
+
+export const FIELD_LABELS: Record<FieldKey, string> = {
+  first_name: "First name",
+  role_title: "Role",
+  function: "Function",
+  seniority: "Seniority",
+  tenure_band: "Tenure",
+  work_mode: "Work mode",
+  tools: "Tools",
+  rekey_pair: "Re-key pair",
+  rekey_hours: "Re-key hours",
+  channel_routine: "Routine",
+  channel_sameday: "Same day",
+  channel_urgent: "Urgent",
+  hours_window: "Hours",
+  hard_rule: "Hard rule",
+  scores: "Working style",
+  ai_usage_level: "AI usage",
+  waits_on: "Waits on",
+  waited_on_by: "Waited on by",
+  annoying_task: "Annoying task",
+};
+
+export interface Section {
+  id: string;
+  label: string;
+  fields: FieldKey[];
+}
+
+export const SECTIONS: Section[] = [
+  {
+    id: "about",
+    label: "About you",
+    fields: ["role_title", "function", "seniority", "tenure_band", "work_mode"],
+  },
+  { id: "tools", label: "Tools", fields: ["tools", "rekey_pair", "rekey_hours"] },
+  {
+    id: "reach",
+    label: "Reach",
+    fields: ["channel_routine", "channel_sameday", "channel_urgent", "hours_window", "hard_rule"],
+  },
+  { id: "style", label: "Working style", fields: ["scores", "ai_usage_level"] },
+  { id: "handoffs", label: "Hand-offs", fields: ["waits_on", "waited_on_by", "annoying_task"] },
+];
+
+export const ALL_FIELDS: FieldKey[] = SECTIONS.flatMap((s) => s.fields);
+
+const ENUMS: Partial<Record<FieldKey, readonly string[]>> = {
+  function: FUNCTIONS,
+  seniority: SENIORITIES,
+  tenure_band: TENURE_BANDS,
+  work_mode: WORK_MODES,
+  rekey_hours: REKEY_HOURS,
+  channel_routine: CHANNELS,
+  channel_sameday: CHANNELS,
+  channel_urgent: CHANNELS,
+};
+
+export function enumFor(key: FieldKey): readonly string[] | undefined {
+  return ENUMS[key];
+}
+
+export interface ValidationFailure {
+  field: string;
+  reason: string;
+}
+
+/** Validates one incoming field value. Returns null when valid. */
+export function validateField(key: string, value: unknown): ValidationFailure | null {
+  const bad = (field: string): ValidationFailure => ({
+    field,
+    reason: "not one of the allowed values",
+  });
+
+  const allowed = ENUMS[key as FieldKey];
+  if (allowed) {
+    if (typeof value !== "string" || !allowed.includes(value)) return bad(key);
+    return null;
+  }
+
+  switch (key) {
+    case "role_title":
+    case "hours_window":
+      return typeof value === "string" && value.trim().length > 0 ? null : bad(key);
+    case "first_name":
+    case "hard_rule":
+    case "waits_on":
+    case "waited_on_by":
+    case "annoying_task":
+      return value === null || typeof value === "string" ? null : bad(key);
+    case "tools":
+      if (!Array.isArray(value) || value.some((t) => typeof t !== "string")) return bad(key);
+      return null;
+    case "rekey_pair":
+      if (value === null) return null;
+      if (!Array.isArray(value) || value.length !== 2 || value.some((t) => typeof t !== "string"))
+        return bad(key);
+      return null;
+    case "ai_usage_level":
+      return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 4
+        ? null
+        : bad(key);
+    case "scores": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return bad(key);
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (!(SCORE_KEYS as readonly string[]).includes(k)) return bad(`scores.${k}`);
+        if (typeof v !== "number" || !(SCORE_VALUES as readonly number[]).includes(v))
+          return bad(`scores.${k}`);
+      }
+      return null;
+    }
+    default:
+      return bad(key);
+  }
+}
+
+/** Normalises a tool name against the catalog, otherwise prefixes "Other: ". */
+export function normaliseTool(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.toLowerCase().startsWith("other:")) {
+    const rest = trimmed.slice(6).trim();
+    const match = TOOL_CATALOG.find((t) => t.toLowerCase() === rest.toLowerCase());
+    return match ?? `Other: ${rest}`;
+  }
+  const match = TOOL_CATALOG.find((t) => t.toLowerCase() === trimmed.toLowerCase());
+  return match ?? `Other: ${trimmed}`;
+}
+
+export function formatChip(key: FieldKey, value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  const label = FIELD_LABELS[key];
+  if (key === "tools") {
+    const list = value as string[];
+    if (!list.length) return null;
+    return `${label}: ${list.join(", ")}`;
+  }
+  if (key === "rekey_pair") {
+    const pair = value as [string, string];
+    return `${label}: ${pair[0]} to ${pair[1]}`;
+  }
+  if (key === "scores") return null;
+  if (key === "ai_usage_level") return `${label}: ${AI_USAGE_LABELS[value as number] ?? value}`;
+  return `${label}: ${String(value)}`;
+}
+
+export function emptyMap(firstName: string): OperatingMap {
+  return { first_name: firstName, tools: [], scores: {} };
+}
