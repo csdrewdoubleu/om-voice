@@ -361,7 +361,7 @@ export function sectionOf(key: string): string | undefined {
   return SECTIONS.find((s) => s.fields.includes(base as FieldKey))?.id;
 }
 
-export type EndedBy = "wrap" | "finish_early" | "cap" | "dropped";
+export type EndedBy = "wrap" | "finish_early" | "finish_early_voice" | "cap" | "dropped";
 
 export interface SessionExport {
   session_id: string;
