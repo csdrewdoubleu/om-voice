@@ -14,7 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      voice_sessions: {
+        Row: {
+          confidence: Json
+          created_at: string
+          duration_seconds: number | null
+          edited_fields: string[]
+          ended_at: string | null
+          fields: Json
+          first_name: string | null
+          id: string
+          quotes: Json
+          started_at: string | null
+        }
+        Insert: {
+          confidence?: Json
+          created_at?: string
+          duration_seconds?: number | null
+          edited_fields?: string[]
+          ended_at?: string | null
+          fields?: Json
+          first_name?: string | null
+          id?: string
+          quotes?: Json
+          started_at?: string | null
+        }
+        Update: {
+          confidence?: Json
+          created_at?: string
+          duration_seconds?: number | null
+          edited_fields?: string[]
+          ended_at?: string | null
+          fields?: Json
+          first_name?: string | null
+          id?: string
+          quotes?: Json
+          started_at?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
