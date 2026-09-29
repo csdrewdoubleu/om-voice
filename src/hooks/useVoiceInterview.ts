@@ -76,6 +76,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const endingRef = useRef(false);
   const endReasonRef = useRef<FinishReason>("complete");
   const lastAgentSoundRef = useRef(0);
+  const startedRef = useRef(false);
   const finishToolAtRef = useRef(0);
   // Backend responses that received tool results and need a continue.
   const needsContinueRef = useRef<Set<string>>(new Set());
@@ -282,6 +283,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       const type = event["type"];
 
       if (type === "session.started") {
+        startedRef.current = true;
         setStatus("live");
         sendLiveNote(
           "Greet the person now in English by first name, in one short sentence, then ask the opening question for section 1. Then pause and listen.",
@@ -437,7 +439,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       }
 
       await pc.setRemoteDescription({ type: "answer", sdp: result.sdp });
-      // Status flips to live on session.started.
+      // Status flips to live on session.started; give up if it never comes.
+      window.setTimeout(() => {
+        if (dcRef.current === dc && !startedRef.current && !finishedRef.current) {
+          fail("session", "The call could not connect. Try again.");
+        }
+      }, 15000);
 
       const buffer = new Uint8Array(256);
       const tick = () => {
