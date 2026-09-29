@@ -394,3 +394,16 @@ export function fullFields(map: OperatingMap, firstName: string): Record<string,
 export function fullKeyed<T>(obj: Partial<Record<string, T>>): Record<string, T | null> {
   return Object.fromEntries(ALL_FIELDS.map((k) => [k, obj[k] ?? null]));
 }
+
+export function sectionsCompleted(map: OperatingMap, endedBy: EndedBy): string[] {
+  const touched = SECTIONS.map((sec) => sectionKeys(sec).some((k) => isCaptured(map, k)));
+  return SECTIONS.filter((sec, i) => {
+    const keys = sectionKeys(sec);
+    if (keys.every((k) => isCaptured(map, k))) return true;
+    const reqDone = keys.filter((k) => REQUIRED_KEYS.includes(k)).every((k) => isCaptured(map, k));
+    if (!reqDone) return false;
+    const later = touched.slice(i + 1).some(Boolean);
+    const isLast = i === SECTIONS.length - 1;
+    return later || (isLast && endedBy === "wrap" && touched[i]);
+  }).map((s) => s.label);
+}

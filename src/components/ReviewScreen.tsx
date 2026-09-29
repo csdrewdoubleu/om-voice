@@ -3,6 +3,7 @@ import {
   CHANNELS,
   FIELD_LABELS,
   FUNCTIONS,
+  OPTIONAL_FIELDS,
   REKEY_HOURS,
   SCORE_KEYS,
   SCORE_POLES,
@@ -75,7 +76,8 @@ export function ReviewScreen({
   onSave,
   onDownload,
 }: Props) {
-  const flagged = (key: FieldKey) => confidence[key] === "low" || isEmpty(key, fields[key]);
+  const flagged = (key: FieldKey) =>
+    confidence[key] === "low" || (!OPTIONAL_FIELDS.includes(key) && isEmpty(key, fields[key]));
 
   const renderEnum = (key: FieldKey, options: readonly string[]) => (
     <select
