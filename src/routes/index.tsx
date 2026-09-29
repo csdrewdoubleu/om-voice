@@ -6,7 +6,24 @@ import { ReviewScreen } from "@/components/ReviewScreen";
 import { DoneScreen } from "@/components/DoneScreen";
 import { useVoiceInterview } from "@/hooks/useVoiceInterview";
 import { supabase } from "@/integrations/supabase/client";
-import type { Confidence, FieldKey, OperatingMap, Quotes } from "@/lib/schema";
+import {
+  fullFields,
+  fullKeyed,
+  sectionsCompleted,
+  type Confidence,
+  type EndedBy,
+  type FieldKey,
+  type OperatingMap,
+  type Quotes,
+  type SessionExport,
+} from "@/lib/schema";
+
+const REASON_TO_ENDED_BY: Record<string, EndedBy> = {
+  complete: "wrap",
+  early: "finish_early",
+  capped: "cap",
+  dropped: "dropped",
+};
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -42,6 +59,9 @@ interface StoredSession {
   quotes: Quotes;
   startedAt: number;
   durationSeconds: number;
+  sessionId?: string;
+  endedAt?: number;
+  endedBy?: EndedBy;
 }
 
 function Index() {
@@ -56,9 +76,14 @@ function Index() {
   const [saving, setSaving] = useState(false);
   const [durationSeconds, setDurationSeconds] = useState(0);
   const startedAtRef = useRef<number>(Date.now());
+  const endedAtRef = useRef<number | null>(null);
+  const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
+  const [endedBy, setEndedBy] = useState<EndedBy>("dropped");
 
   const handleFinish = useCallback(
     (reason: "complete" | "dropped" | "capped" | "early") => {
+      endedAtRef.current = Date.now();
+      setEndedBy(REASON_TO_ENDED_BY[reason] ?? "dropped");
       setBanner(reason === "dropped" ? "The call dropped; here's what we got." : null);
       setScreen("review");
     },
@@ -80,6 +105,9 @@ function Index() {
       setReviewQuotes(stored.quotes ?? {});
       setDurationSeconds(stored.durationSeconds ?? 0);
       startedAtRef.current = stored.startedAt ?? Date.now();
+      endedAtRef.current = stored.endedAt ?? Date.now();
+      if (stored.sessionId) setSessionId(stored.sessionId);
+      setEndedBy(stored.endedBy ?? "dropped");
       setScreen("review");
     } catch {
       sessionStorage.removeItem(STORAGE_KEY);
@@ -96,9 +124,27 @@ function Index() {
       quotes: voice.quotes,
       startedAt: startedAtRef.current,
       durationSeconds: voice.elapsed,
+      sessionId,
     };
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed]);
+  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed, sessionId]);
+
+  // Persist the end details once in review so a refresh keeps them.
+  useEffect(() => {
+    if (screen !== "review") return;
+    const stored: StoredSession = {
+      firstName,
+      fields: reviewFields,
+      confidence: reviewConfidence,
+      quotes: reviewQuotes,
+      startedAt: startedAtRef.current,
+      durationSeconds,
+      sessionId,
+      endedAt: endedAtRef.current ?? Date.now(),
+      endedBy,
+    };
+    if (Object.keys(reviewFields).length) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  }, [screen, firstName, reviewFields, reviewConfidence, reviewQuotes, durationSeconds, sessionId, endedBy]);
 
   // Carry the live capture into review when the call ends.
   useEffect(() => {
@@ -129,6 +175,8 @@ function Index() {
   useEffect(() => {
     if (voice.status !== "error") return;
     if (voice.errorKind === "connection") {
+      endedAtRef.current = Date.now();
+      setEndedBy("dropped");
       setBanner("The call dropped; here's what we got.");
       setScreen("review");
       return;
@@ -146,28 +194,46 @@ function Index() {
     setEdited((prev) => (prev.includes(key) ? prev : [...prev, key]));
   };
 
+  const buildExport = (): SessionExport => ({
+    session_id: sessionId,
+    first_name: firstName || reviewFields.first_name || "",
+    started_at: new Date(startedAtRef.current).toISOString(),
+    ended_at: new Date(endedAtRef.current ?? Date.now()).toISOString(),
+    duration_seconds: durationSeconds,
+    ended_by: endedBy,
+    fields: fullFields(reviewFields, firstName),
+    confidence: fullKeyed(reviewConfidence),
+    quotes: fullKeyed(reviewQuotes as Partial<Record<string, string>>),
+    edited_fields: edited,
+    sections_completed: sectionsCompleted(reviewFields, endedBy),
+  });
+
   const handleDownload = () => {
-    const blob = new Blob([JSON.stringify(reviewFields, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(buildExport(), null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `operating-map-${(reviewFields.first_name || "session").toLowerCase()}.json`;
+    a.download = `operating-map-${(firstName || "session").toLowerCase()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const handleSave = async () => {
     setSaving(true);
+    const x = buildExport();
     const { error } = await supabase.from("voice_sessions").insert({
-      first_name: reviewFields.first_name ?? firstName,
-      started_at: new Date(startedAtRef.current).toISOString(),
-      ended_at: new Date().toISOString(),
-      duration_seconds: durationSeconds,
-      fields: reviewFields as never,
-      confidence: reviewConfidence as never,
-      quotes: reviewQuotes as never,
-      edited_fields: edited,
-    });
+      id: x.session_id,
+      first_name: x.first_name,
+      started_at: x.started_at,
+      ended_at: x.ended_at,
+      duration_seconds: x.duration_seconds,
+      ended_by: x.ended_by,
+      fields: x.fields as never,
+      confidence: x.confidence as never,
+      quotes: x.quotes as never,
+      edited_fields: x.edited_fields,
+      sections_completed: x.sections_completed,
+    } as never);
     setSaving(false);
     if (error) {
       setBanner("That did not save. Try again.");

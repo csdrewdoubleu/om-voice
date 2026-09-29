@@ -68,7 +68,7 @@ export const RECORD_ANSWERS_TOOL = {
           tenure_band: { type: "string", enum: [...TENURE_BANDS] },
           work_mode: { type: "string", enum: [...WORK_MODES] },
           tools: { type: "array", items: { type: "string" } },
-          rekey_pair: { type: ["array", "null"], items: { type: "string" } },
+          rekey_pair: { type: ["array", "null"], items: { type: "string" }, minItems: 2, maxItems: 2 },
           rekey_hours: { type: "string", enum: [...REKEY_HOURS] },
           channel_routine: { type: "string", enum: [...CHANNELS] },
           channel_sameday: { type: "string", enum: [...CHANNELS] },

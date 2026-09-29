@@ -278,6 +278,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const start = useCallback(async () => {
     if (status === "connecting" || status === "live") return;
     setStatus("connecting");
+    fieldsRef.current = { ...fieldsRef.current, first_name: firstName };
+    setFields(fieldsRef.current);
     setErrorKind(null);
     setErrorMessage("");
 
