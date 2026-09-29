@@ -462,17 +462,17 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         }
         if (next === FORCE_WRAP_SECONDS) {
           sendSystemNote(
-            "Six and a half minutes have passed. The time budget has run out. Begin the wrap now, keep it brief, then call finish_session with reason "complete".",
+            "Six and a half minutes have passed. The time budget has run out. Begin the wrap now, keep it brief, then call finish_session with reason complete.",
           );
           if (dcRef.current?.readyState === "open")
-            dcRef.current.send(JSON.stringify({ type: "response.create" }));
+            requestResponse();
         }
         if (next >= HARD_CAP_SECONDS) finish("capped");
         return next;
       });
     }, 1000);
     return () => window.clearInterval(id);
-  }, [status, finish, sendSystemNote]);
+  }, [status, finish, sendSystemNote, requestResponse]);
 
   useEffect(() => () => teardown(), []);
 
