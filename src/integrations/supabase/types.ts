@@ -22,6 +22,7 @@ export type Database = {
           edited_fields: string[]
           ended_at: string | null
           ended_by: string | null
+          estimated_cost: number | null
           fields: Json
           first_name: string | null
           id: string
@@ -36,6 +37,7 @@ export type Database = {
           edited_fields?: string[]
           ended_at?: string | null
           ended_by?: string | null
+          estimated_cost?: number | null
           fields?: Json
           first_name?: string | null
           id?: string
@@ -50,6 +52,7 @@ export type Database = {
           edited_fields?: string[]
           ended_at?: string | null
           ended_by?: string | null
+          estimated_cost?: number | null
           fields?: Json
           first_name?: string | null
           id?: string
