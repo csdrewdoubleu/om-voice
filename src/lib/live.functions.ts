@@ -16,7 +16,7 @@ const DAILY_SESSION_CEILING = 40;
 export interface LiveSessionResult {
   ok: boolean;
   error?: string;
-  sessionId?: string;
+  sessionId?: string | undefined;
   sdp?: string;
 }
 
