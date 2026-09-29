@@ -1,0 +1,1 @@
+ALTER TABLE public.voice_sessions ADD COLUMN IF NOT EXISTS estimated_cost NUMERIC;

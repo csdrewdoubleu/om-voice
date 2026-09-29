@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { createRealtimeSession } from "@/lib/realtime.functions";
+import { createLiveSession } from "@/lib/live.functions";
 import {
   missingInSection,
   missingRequired,
@@ -12,6 +12,11 @@ import {
   type OperatingMap,
   type Quotes,
 } from "@/lib/schema";
+
+// ---- Settings ----
+const SILENCE_AFTER_FINISH_MS = 1500;
+const FINISH_FALLBACK_MS = 8000;
+const SPEAKING_LEVEL = 0.06;
 
 export type VoiceStatus = "idle" | "connecting" | "live" | "ended" | "error";
 export type VoiceErrorKind = "mic" | "session" | "connection" | null;
@@ -33,8 +38,18 @@ interface RecordArgs {
   quotes?: Record<string, string>;
 }
 
+function rms(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): number {
+  analyser.getByteTimeDomainData(buffer);
+  let sum = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    const v = (buffer[i]! - 128) / 128;
+    sum += v * v;
+  }
+  return Math.min(1, Math.sqrt(sum / buffer.length) * 4);
+}
+
 export function useVoiceInterview({ firstName, onFinish }: Options) {
-  const getToken = useServerFn(createRealtimeSession);
+  const startSession = useServerFn(createLiveSession);
 
   const [status, setStatus] = useState<VoiceStatus>("idle");
   const [errorKind, setErrorKind] = useState<VoiceErrorKind>(null);
@@ -60,8 +75,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const currentSectionRef = useRef<string>("about");
   const endingRef = useRef(false);
   const endReasonRef = useRef<FinishReason>("complete");
-  const responseActiveRef = useRef(false);
-  const pendingCreateRef = useRef(false);
+  const lastAgentSoundRef = useRef(0);
+  const startedRef = useRef(false);
+  const finishToolAtRef = useRef(0);
+  // Backend responses that received tool results and need a continue.
+  const needsContinueRef = useRef<Set<string>>(new Set());
+  const callResponseRef = useRef<Map<string, string>>(new Map());
 
   const finish = useCallback(
     (reason: FinishReason) => {
@@ -81,8 +100,14 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   function teardown() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
+    const dc = dcRef.current;
     try {
-      dcRef.current?.close();
+      if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "session.close" }));
+    } catch {
+      /* best effort */
+    }
+    try {
+      dc?.close();
     } catch {
       /* already closed */
     }
@@ -104,6 +129,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       audioElRef.current = null;
     }
   }
+
+  const send = useCallback((payload: Record<string, unknown>) => {
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    dc.send(JSON.stringify(payload));
+  }, []);
 
   const applyRecord = useCallback((args: RecordArgs) => {
     const incoming = { ...(args.fields ?? {}) };
@@ -183,96 +214,40 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     };
   }, [firstName]);
 
-  const sendSystemNote = useCallback((text: string) => {
-    const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    dc.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
-      }),
-    );
-  }, []);
-
-  const requestResponse = useCallback(() => {
-    const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open" || endingRef.current) return;
-    // A response.create during an active response is rejected, so queue it.
-    if (responseActiveRef.current) {
-      pendingCreateRef.current = true;
-      return;
-    }
-    pendingCreateRef.current = false;
-    dc.send(JSON.stringify({ type: "response.create" }));
-  }, []);
-
-  const sendToolResult = useCallback(
-    (callId: string, output: unknown) => {
-      const dc = dcRef.current;
-      if (!dc || dc.readyState !== "open") return;
-      dc.send(
-        JSON.stringify({
-          type: "conversation.item.create",
-          item: {
-            type: "function_call_output",
-            call_id: callId,
-            output: JSON.stringify(output),
-          },
-        }),
-      );
-      requestResponse();
+  /** Steer the live voice directly (time notes, greeting). */
+  const sendLiveNote = useCallback(
+    (text: string) => {
+      send({
+        type: "session.instructions.append",
+        event_id: `note_${Date.now()}`,
+        delegation_id: null,
+        content: text,
+      });
     },
-    [requestResponse],
+    [send],
   );
 
-  const handleServerEvent = useCallback(
-    (event: Record<string, unknown>) => {
-      const type = event["type"];
+  const sendToolResult = useCallback(
+    (responseId: string | undefined, callId: string, output: unknown) => {
+      send({
+        type: "response.item.create",
+        event_id: `result_${callId}`,
+        item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) },
+      });
+      if (responseId) needsContinueRef.current.add(responseId);
+    },
+    [send],
+  );
 
-      if (type === "response.created") responseActiveRef.current = true;
-      if (type === "response.done" || type === "response.cancelled") {
-        responseActiveRef.current = false;
-        if (pendingCreateRef.current) requestResponse();
-      }
-
-      if (type === "input_audio_buffer.speech_started") setSpeaker("person");
-      if (type === "input_audio_buffer.speech_stopped") setSpeaker("idle");
-      if (type === "output_audio_buffer.started" || type === "response.output_audio.delta")
-        setSpeaker("agent");
-      if (type === "output_audio_buffer.stopped" || type === "response.output_audio.done") {
-        setSpeaker("idle");
-        if (endingRef.current && type === "output_audio_buffer.stopped") {
-          const reason = endReasonRef.current;
-          window.setTimeout(() => finishRef.current(reason), 300);
-        }
-      }
-
-      const isCallDone =
-        type === "response.function_call_arguments.done" ||
-        type === "response.output_item.done" ||
-        type === "conversation.item.done";
-
-      if (!isCallDone) return;
-
-      let name: string | undefined;
-      let callId: string | undefined;
-      let argsText: string | undefined;
-
-      if (type === "response.function_call_arguments.done") {
-        name = event["name"] as string | undefined;
-        callId = event["call_id"] as string | undefined;
-        argsText = event["arguments"] as string | undefined;
-      } else {
-        const item = (event["item"] ?? {}) as Record<string, unknown>;
-        if (item["type"] !== "function_call") return;
-        name = item["name"] as string | undefined;
-        callId = item["call_id"] as string | undefined;
-        argsText = item["arguments"] as string | undefined;
-      }
-
+  const runFunctionCall = useCallback(
+    (responseId: string | undefined, item: Record<string, unknown>) => {
+      const name = item["name"] as string | undefined;
+      const callId = item["call_id"] as string | undefined;
+      const argsText = item["arguments"] as string | undefined;
       if (!callId || handledCallsRef.current.has(callId)) return;
+      handledCallsRef.current.add(callId);
+
       if (name === "finish_session") {
-        handledCallsRef.current.add(callId);
         let reason = "complete";
         try {
           reason = (JSON.parse(argsText || "{}") as { reason?: string }).reason ?? "complete";
@@ -281,34 +256,80 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         }
         endReasonRef.current = reason === "person_requested" ? "voice_early" : "complete";
         endingRef.current = true;
-        pendingCreateRef.current = false;
-        const dc = dcRef.current;
-        if (dc && dc.readyState === "open") {
-          dc.send(
-            JSON.stringify({
-              type: "conversation.item.create",
-              item: { type: "function_call_output", call_id: callId, output: '{"ok":true}' },
-            }),
-          );
-        }
-        // Wait for the closing audio to finish playing; fall back after 8 seconds.
+        sendToolResult(responseId, callId, { ok: true });
+        finishToolAtRef.current = performance.now();
         const fallbackReason = endReasonRef.current;
-        window.setTimeout(() => finishRef.current(fallbackReason), 8000);
+        window.setTimeout(() => finishRef.current(fallbackReason), FINISH_FALLBACK_MS);
         return;
       }
-      if (name !== "record_answers") return;
-      handledCallsRef.current.add(callId);
-
+      if (name !== "record_answers") {
+        sendToolResult(responseId, callId, { ok: false, reason: `unknown function ${name}` });
+        return;
+      }
       let parsed: RecordArgs = {};
       try {
         parsed = JSON.parse(argsText || "{}") as RecordArgs;
       } catch {
-        sendToolResult(callId, { ok: false, reason: "arguments were not valid JSON" });
+        sendToolResult(responseId, callId, { ok: false, reason: "arguments were not valid JSON" });
         return;
       }
-      sendToolResult(callId, applyRecord(parsed));
+      sendToolResult(responseId, callId, applyRecord(parsed));
     },
     [applyRecord, sendToolResult],
+  );
+
+  const handleServerEvent = useCallback(
+    (event: Record<string, unknown>) => {
+      const type = event["type"];
+
+      if (type === "session.started") {
+        startedRef.current = true;
+        setStatus("live");
+        sendLiveNote(
+          "Greet the person now in English by first name, in one short sentence, then ask the opening question for section 1. Then pause and listen.",
+        );
+        return;
+      }
+      if (type === "session.closed") {
+        if (!finishedRef.current) finishRef.current(endingRef.current ? endReasonRef.current : "dropped");
+        return;
+      }
+      if (type === "error") {
+        console.warn("live error", event["error"]);
+        return;
+      }
+      if (type !== "response.event") return;
+
+      const inner = (event["event"] ?? {}) as Record<string, unknown>;
+      const innerType = inner["type"];
+      const response = (inner["response"] ?? {}) as Record<string, unknown>;
+
+      if (innerType === "response.output_item.done") {
+        const item = (inner["item"] ?? {}) as Record<string, unknown>;
+        if (item["type"] !== "function_call") return;
+        const responseId =
+          (inner["response_id"] as string | undefined) ??
+          callResponseRef.current.get("current");
+        runFunctionCall(responseId, item);
+        return;
+      }
+      if (innerType === "response.created" && typeof response["id"] === "string") {
+        callResponseRef.current.set("current", response["id"] as string);
+        return;
+      }
+      if (
+        innerType === "response.completed" ||
+        innerType === "response.done" ||
+        innerType === "response.incomplete"
+      ) {
+        const id = (response["id"] as string | undefined) ?? callResponseRef.current.get("current");
+        if (id && needsContinueRef.current.has(id)) {
+          needsContinueRef.current.delete(id);
+          send({ type: "response.create", event_id: `continue_${id}` });
+        }
+      }
+    },
+    [runFunctionCall, send, sendLiveNote],
   );
 
   const start = useCallback(async () => {
@@ -330,24 +351,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     }
     micRef.current = mic;
 
-    let token: string;
-    try {
-      const result = await getToken({ data: { firstName } });
-      if (!result.ok || !result.value) {
-        mic.getTracks().forEach((t) => t.stop());
-        setStatus("error");
-        setErrorKind("session");
-        setErrorMessage(result.error ?? "Could not start the conversation.");
-        return;
-      }
-      token = result.value;
-    } catch {
-      mic.getTracks().forEach((t) => t.stop());
+    const fail = (kind: VoiceErrorKind, message: string) => {
+      teardown();
       setStatus("error");
-      setErrorKind("session");
-      setErrorMessage("Could not start the conversation.");
-      return;
-    }
+      setErrorKind(kind);
+      setErrorMessage(message);
+    };
 
     try {
       const pc = new RTCPeerConnection();
@@ -365,19 +374,22 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       analysersRef.current.mic = micAnalyser;
 
       pc.ontrack = (e) => {
-        audioEl.srcObject = e.streams[0]!;
+        const stream = e.streams[0] ?? new MediaStream([e.track]);
+        audioEl.srcObject = stream;
+        audioEl.play().catch(() => undefined);
         try {
           const remoteAnalyser = ctx.createAnalyser();
           remoteAnalyser.fftSize = 512;
-          ctx.createMediaStreamSource(e.streams[0]!).connect(remoteAnalyser);
+          ctx.createMediaStreamSource(stream).connect(remoteAnalyser);
           analysersRef.current.remote = remoteAnalyser;
         } catch {
-          /* analyser is decorative only */
+          /* analyser failure only affects the ring */
         }
       };
 
-      pc.addTrack(mic.getTracks()[0]!, mic);
+      for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
 
+      // Data channel and listeners before the offer.
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
       dc.addEventListener("message", (e) => {
@@ -387,64 +399,87 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
           /* ignore malformed event */
         }
       });
-      dc.addEventListener("open", () => setStatus("live"));
 
       pc.addEventListener("connectionstatechange", () => {
         if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-          finish("dropped");
+          finishRef.current(endingRef.current ? endReasonRef.current : "dropped");
         }
       });
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      if (pc.iceGatheringState !== "complete") {
+        await new Promise<void>((resolve) => {
+          const timeout = window.setTimeout(done, 5000);
+          function done() {
+            window.clearTimeout(timeout);
+            pc.removeEventListener("icegatheringstatechange", onState);
+            resolve();
+          }
+          function onState() {
+            if (pc.iceGatheringState === "complete") done();
+          }
+          pc.addEventListener("icegatheringstatechange", onState);
+        });
+      }
 
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        body: offer.sdp ?? "",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/sdp",
-        },
-      });
+      const sdp = pc.localDescription?.sdp;
+      if (!sdp) throw new Error("Missing local SDP offer");
 
-      if (!sdpResponse.ok) throw new Error(`SDP exchange failed: ${sdpResponse.status}`);
+      let result;
+      try {
+        result = await startSession({ data: { firstName, sdp } });
+      } catch {
+        fail("session", "Could not start the conversation.");
+        return;
+      }
+      if (!result.ok || !result.sdp) {
+        fail("session", result.error ?? "Could not start the conversation.");
+        return;
+      }
 
-      await pc.setRemoteDescription({ type: "answer", sdp: await sdpResponse.text() });
-      setStatus("live");
+      await pc.setRemoteDescription({ type: "answer", sdp: result.sdp });
+      // Status flips to live on session.started; give up if it never comes.
+      window.setTimeout(() => {
+        if (dcRef.current === dc && !startedRef.current && !finishedRef.current) {
+          fail("session", "The call could not connect. Try again.");
+        }
+      }, 15000);
 
-      // Drive the level meter.
       const buffer = new Uint8Array(256);
       const tick = () => {
-        const analyser =
-          analysersRef.current.remote && speakerIsAgent()
-            ? analysersRef.current.remote
-            : analysersRef.current.mic;
-        if (analyser) {
-          analyser.getByteTimeDomainData(buffer);
-          let sum = 0;
-          for (let i = 0; i < buffer.length; i += 1) {
-            const v = (buffer[i]! - 128) / 128;
-            sum += v * v;
+        const { mic: micA, remote } = analysersRef.current;
+        const agentLevel = remote ? rms(remote, buffer) : 0;
+        const personLevel = micA ? rms(micA, buffer) : 0;
+        const now = performance.now();
+        if (agentLevel > SPEAKING_LEVEL) lastAgentSoundRef.current = now;
+        const agentActive = now - lastAgentSoundRef.current < 400;
+        if (agentActive) {
+          setSpeaker("agent");
+          setLevel(agentLevel);
+        } else if (personLevel > SPEAKING_LEVEL) {
+          setSpeaker("person");
+          setLevel(personLevel);
+        } else {
+          setSpeaker("idle");
+          setLevel(Math.max(agentLevel, personLevel));
+        }
+        // After finish_session: close once the voice has been quiet long enough.
+        if (endingRef.current && finishToolAtRef.current) {
+          const quietSince = Math.max(lastAgentSoundRef.current, finishToolAtRef.current);
+          if (now - quietSince >= SILENCE_AFTER_FINISH_MS) {
+            finishRef.current(endReasonRef.current);
+            return;
           }
-          setLevel(Math.min(1, Math.sqrt(sum / buffer.length) * 4));
         }
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
     } catch {
-      teardown();
-      setStatus("error");
-      setErrorKind("connection");
-      setErrorMessage("The call could not connect.");
+      fail("connection", "The call could not connect.");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstName, getToken, handleServerEvent, status, finish]);
-
-  const speakerRef = useRef(speaker);
-  speakerRef.current = speaker;
-  function speakerIsAgent() {
-    return speakerRef.current === "agent";
-  }
+  }, [firstName, startSession, handleServerEvent, status]);
 
   // Elapsed timer plus the hard seven-minute cap.
   useEffect(() => {
@@ -455,24 +490,22 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         if (next === REQUIRED_ONLY_SECONDS) {
           const missing = missingRequired(fieldsRef.current);
           if (missing.length) {
-            sendSystemNote(
+            sendLiveNote(
               `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
             );
           }
         }
         if (next === FORCE_WRAP_SECONDS) {
-          sendSystemNote(
-            "Six and a half minutes have passed. The time budget has run out. Begin the wrap now, keep it brief, then call finish_session with reason complete.",
+          sendLiveNote(
+            "Six and a half minutes have passed. Begin the wrap now and keep it brief. After it, tell the backend the interview is complete.",
           );
-          if (dcRef.current?.readyState === "open")
-            requestResponse();
         }
         if (next >= HARD_CAP_SECONDS) finish("capped");
         return next;
       });
     }, 1000);
     return () => window.clearInterval(id);
-  }, [status, finish, sendSystemNote, requestResponse]);
+  }, [status, finish, sendLiveNote]);
 
   useEffect(() => () => teardown(), []);
 

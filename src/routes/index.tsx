@@ -234,6 +234,7 @@ function Index() {
       quotes: x.quotes as never,
       edited_fields: x.edited_fields,
       sections_completed: x.sections_completed,
+      estimated_cost: Math.round((x.duration_seconds / 60) * 0.05 * 10000) / 10000,
     } as never);
     setSaving(false);
     if (error) {
