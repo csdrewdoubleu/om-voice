@@ -1,0 +1,1 @@
+ALTER TABLE public.voice_sessions ADD COLUMN IF NOT EXISTS ended_by text CHECK (ended_by IN ('wrap','finish_early','cap','dropped')), ADD COLUMN IF NOT EXISTS sections_completed text[] NOT NULL DEFAULT '{}'::text[];

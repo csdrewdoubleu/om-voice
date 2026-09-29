@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { createRealtimeSession } from "@/lib/realtime.functions";
 import {
+  missingInSection,
+  missingRequired,
   normaliseTool,
+  sectionOf,
   validateField,
   type Confidence,
   type FieldKey,
@@ -14,6 +17,8 @@ export type VoiceStatus = "idle" | "connecting" | "live" | "ended" | "error";
 export type VoiceErrorKind = "mic" | "session" | "connection" | null;
 
 export const HARD_CAP_SECONDS = 7 * 60;
+export const REQUIRED_ONLY_SECONDS = 5 * 60;
+export const FORCE_WRAP_SECONDS = 6 * 60 + 30;
 
 interface Options {
   firstName: string;
@@ -50,6 +55,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const finishedRef = useRef(false);
   const handledCallsRef = useRef<Set<string>>(new Set());
   const fieldsRef = useRef<OperatingMap>({ first_name: firstName });
+  const currentSectionRef = useRef<string>("about");
+  const endingRef = useRef(false);
 
   const finish = useCallback(
     (reason: "complete" | "dropped" | "capped" | "early") => {
@@ -62,6 +69,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [onFinish],
   );
+
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
 
   function teardown() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -91,9 +101,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   }
 
   const applyRecord = useCallback((args: RecordArgs) => {
-    const incoming = args.fields ?? {};
+    const incoming = { ...(args.fields ?? {}) };
+    delete incoming["first_name"]; // first name comes from the start screen only
     const captured: string[] = [];
+    const notes: string[] = [];
 
+    // Validate everything first so a bad call changes nothing.
+    const cleaned: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(incoming)) {
       let value = raw;
       if (key === "tools" && Array.isArray(raw)) {
@@ -101,27 +115,78 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
           .filter((t): t is string => typeof t === "string")
           .map(normaliseTool);
       }
+      if (key === "rekey_pair" && Array.isArray(raw)) {
+        value = (raw as unknown[]).map((t) => (typeof t === "string" ? normaliseTool(t) : t));
+      }
       const failure = validateField(key, value);
-      if (failure) return { ok: false as const, ...failure };
-
-      captured.push(key);
-      const k = key as FieldKey;
-      setFields((prev) => {
-        const next = { ...prev, [k]: value } as OperatingMap;
-        if (k === "scores") {
-          next.scores = { ...(prev.scores ?? {}), ...(value as Record<string, number>) };
-        }
-        fieldsRef.current = next;
-        return next;
-      });
-
-      const conf = args.confidence?.[key];
-      if (conf) setConfidence((prev) => ({ ...prev, [k]: conf }));
-      const quote = args.quotes?.[key];
-      if (quote) setQuotes((prev) => ({ ...prev, [key]: quote }));
+      if (failure) {
+        return {
+          ok: false as const,
+          ...failure,
+          reason:
+            key === "rekey_pair"
+              ? "rekey_pair must be a two-item array of tool names, or null"
+              : failure.reason,
+        };
+      }
+      cleaned[key] = value;
     }
 
-    return { ok: true as const, captured };
+    const prev = fieldsRef.current;
+    const next: OperatingMap = { ...prev, first_name: firstName };
+    for (const [key, value] of Object.entries(cleaned)) {
+      const k = key as FieldKey;
+      if (k === "scores") {
+        next.scores = { ...(prev.scores ?? {}), ...(value as Record<string, number>) };
+      } else if (k === "tools") {
+        next.tools = [...new Set([...(next.tools ?? []), ...(value as string[])])];
+      } else {
+        (next as Record<string, unknown>)[k] = value;
+      }
+      captured.push(key);
+      const conf = args.confidence?.[key];
+      if (conf) setConfidence((p) => ({ ...p, [k]: conf }));
+      const quote = args.quotes?.[key];
+      if (quote) setQuotes((p) => ({ ...p, [key]: quote }));
+    }
+
+    // Any re-key tool not already in tools is added automatically.
+    if (Array.isArray(next.rekey_pair)) {
+      const tools = [...(next.tools ?? [])];
+      for (const t of next.rekey_pair) {
+        if (!tools.includes(t)) {
+          tools.push(t);
+          notes.push(`added ${t} to tools`);
+        }
+      }
+      next.tools = tools;
+    }
+
+    fieldsRef.current = next;
+    setFields(next);
+
+    const lastKey = captured[captured.length - 1];
+    const sec = lastKey ? sectionOf(lastKey) : undefined;
+    if (sec) currentSectionRef.current = sec;
+
+    return {
+      ok: true as const,
+      captured,
+      missing_in_section: missingInSection(next, currentSectionRef.current),
+      missing_required: missingRequired(next),
+      ...(notes.length ? { note: notes.join("; ") } : {}),
+    };
+  }, [firstName]);
+
+  const sendSystemNote = useCallback((text: string) => {
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    dc.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "message", role: "system", content: [{ type: "input_text", text }] },
+      }),
+    );
   }, []);
 
   const sendToolResult = useCallback((callId: string, output: unknown) => {
@@ -148,8 +213,12 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       if (type === "input_audio_buffer.speech_stopped") setSpeaker("idle");
       if (type === "output_audio_buffer.started" || type === "response.output_audio.delta")
         setSpeaker("agent");
-      if (type === "output_audio_buffer.stopped" || type === "response.output_audio.done")
+      if (type === "output_audio_buffer.stopped" || type === "response.output_audio.done") {
         setSpeaker("idle");
+        if (endingRef.current && type === "output_audio_buffer.stopped") {
+          window.setTimeout(() => finishRef.current("complete"), 600);
+        }
+      }
 
       const isCallDone =
         type === "response.function_call_arguments.done" ||
@@ -174,7 +243,24 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         argsText = item["arguments"] as string | undefined;
       }
 
-      if (name !== "record_answers" || !callId || handledCallsRef.current.has(callId)) return;
+      if (!callId || handledCallsRef.current.has(callId)) return;
+      if (name === "end_interview") {
+        handledCallsRef.current.add(callId);
+        endingRef.current = true;
+        const dc = dcRef.current;
+        if (dc && dc.readyState === "open") {
+          dc.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "function_call_output", call_id: callId, output: '{"ok":true}' },
+            }),
+          );
+        }
+        // Let the goodbye finish playing, with a fallback.
+        window.setTimeout(() => finishRef.current("complete"), 8000);
+        return;
+      }
+      if (name !== "record_answers") return;
       handledCallsRef.current.add(callId);
 
       let parsed: RecordArgs = {};
@@ -192,6 +278,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const start = useCallback(async () => {
     if (status === "connecting" || status === "live") return;
     setStatus("connecting");
+    fieldsRef.current = { ...fieldsRef.current, first_name: firstName };
+    setFields(fieldsRef.current);
     setErrorKind(null);
     setErrorMessage("");
 
@@ -328,12 +416,27 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     const id = window.setInterval(() => {
       setElapsed((prev) => {
         const next = prev + 1;
+        if (next === REQUIRED_ONLY_SECONDS) {
+          const missing = missingRequired(fieldsRef.current);
+          if (missing.length) {
+            sendSystemNote(
+              `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
+            );
+          }
+        }
+        if (next === FORCE_WRAP_SECONDS) {
+          sendSystemNote(
+            "Six and a half minutes have passed. The time budget has run out. Begin the wrap now, keep it brief, then call end_interview.",
+          );
+          dcRef.current?.readyState === "open" &&
+            dcRef.current.send(JSON.stringify({ type: "response.create" }));
+        }
         if (next >= HARD_CAP_SECONDS) finish("capped");
         return next;
       });
     }, 1000);
     return () => window.clearInterval(id);
-  }, [status, finish]);
+  }, [status, finish, sendSystemNote]);
 
   useEffect(() => () => teardown(), []);
 

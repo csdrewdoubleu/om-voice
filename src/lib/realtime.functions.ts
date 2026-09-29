@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { buildSystemPrompt, RECORD_ANSWERS_TOOL } from "./prompt";
+import { buildSystemPrompt, END_INTERVIEW_TOOL, RECORD_ANSWERS_TOOL } from "./prompt";
 
 const DAILY_SESSION_CAP = 40;
 
@@ -56,7 +56,7 @@ export const createRealtimeSession = createServerFn({ method: "POST" })
             input: { turn_detection: { type: "semantic_vad" } },
             output: { voice: "cedar" },
           },
-          tools: [RECORD_ANSWERS_TOOL],
+          tools: [RECORD_ANSWERS_TOOL, END_INTERVIEW_TOOL],
           tool_choice: "auto",
         },
       }),
