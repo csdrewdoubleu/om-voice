@@ -170,7 +170,7 @@ export function normaliseHandoffs(raw: unknown): unknown {
   if (!Array.isArray(raw)) return raw;
   return raw.map((h) => {
     if (!h || typeof h !== "object") return h;
-    const e = { ...(h as Record<string, unknown>) };
+    const e = { ...(h as Record<string, unknown>) } as { target?: unknown; target_kind?: unknown; what?: unknown };
     if (typeof e.target === "string") e.target = e.target.trim();
     if (e.target_kind === "function" && typeof e.target === "string")
       e.target = mapFunction(e.target) ?? e.target;
@@ -183,7 +183,7 @@ export function normaliseHandoffs(raw: unknown): unknown {
 export function handoffReason(value: unknown): string | null {
   if (!Array.isArray(value)) return "handoffs must be an array";
   if (value.length > 6) return "at most six hand-offs";
-  for (const h of value as Record<string, unknown>[]) {
+  for (const h of value as { direction?: unknown; target_kind?: unknown; target?: unknown; what?: unknown }[]) {
     if (!h || typeof h !== "object") return "each hand-off must be an object";
     if (!(HANDOFF_DIRECTIONS as readonly unknown[]).includes(h.direction)) return "direction must be waits_on or waited_on_by";
     if (!(HANDOFF_KINDS as readonly unknown[]).includes(h.target_kind)) return "target_kind must be person, function or external";

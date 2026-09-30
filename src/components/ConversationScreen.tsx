@@ -1,4 +1,4 @@
-import { SECTIONS, formatChip, formatHandoff, type Confidence, type OperatingMap } from "@/lib/schema";
+import { SECTIONS, formatChip, formatHandoff, type FieldKey, type Confidence, type OperatingMap } from "@/lib/schema";
 
 interface Props {
   fields: OperatingMap;
@@ -73,7 +73,7 @@ export function ConversationScreen({
       <div className="flex-1 space-y-4 overflow-y-auto">
         {SECTIONS.map((section) => {
           const chips = section.fields
-            .flatMap((key) =>
+            .flatMap((key): { key: FieldKey; id: string; text: string | null }[] =>
               key === "handoffs"
                 ? (fields.handoffs ?? []).map((h, i) => ({ key, id: `handoffs-${i}`, text: formatHandoff(h) }))
                 : [{ key, id: key as string, text: formatChip(key, fields[key]) }],
