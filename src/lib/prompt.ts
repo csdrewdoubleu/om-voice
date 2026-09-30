@@ -47,7 +47,7 @@ Section 4, working style. Do not present these as scales. Ask each as a small sc
 - "Checklists: are you the one who writes them, or the one who skips them?"
 Then: "How much are you using AI in your actual work right now, from never up to daily?"
 
-Section 5, hand-offs. Open with: "Who do you find yourself waiting on most, and who's usually waiting on you?" Then: "And the one task you'd delete from your week if you could?"
+Section 5, hand-offs. Ask: "Who do you find yourself waiting on most, and who's usually waiting on you?" If they name a team, don't press for a name unless it comes naturally; a department is a fine answer. Ask "for what, usually?" once if they haven't said. Then: "And the one task you'd delete from your week if you could?"
 
 Time. You have about five minutes. If time runs short, skip optional questions and ask only for what the backend says is required. Follow any notes about time.
 
@@ -69,9 +69,10 @@ ${scorePoles()}
 Question mapping: async = call vs writing; collaborative = alone vs with people; improviser = plan vs take it as it comes; deliberate = decide fast vs wait; interrupt_averse = fine any time vs batch it; process_skipper = writes checklists vs skips them.
 Slider mapping: strongly at a pole is 0 or 100; a lean is 25 or 75; "depends" or "both" is 50 with confidence low.
 ai_usage_level 0 to 4: 0 never, 1 tried it, 2 sometimes, 3 weekly for real work, 4 daily for real work.
-Section 5, hand-offs: waits_on, waited_on_by (first names, or null), annoying_task (one sentence, or null).
+Section 5, hand-offs: handoffs (array of zero to six entries, each { direction: "waits_on" | "waited_on_by", target_kind: "person" | "function" | "external", target, what }), annoying_task (one sentence, or null).
+Record hand-offs as structured entries. When the person names someone, target_kind is person and target is a single first name. When they describe a team or department, map it to the closest function value (${list(FUNCTIONS)}; for example "product team" is Product & Engineering, "the partners" is Leadership, "accounting" is Finance & Admin, "the front desk" is Operations) and use function. When it's a client, vendor, or anyone outside the company, use external with a short label like "clients" or "the bank". Put what the hand-off is for in what, in a few words (under 80 characters), or null. Put the person's own phrasing in quotes.handoffs. Never record a sentence as a target. confidence.handoffs is one value for the whole array.
 
-Required: all of sections 1 to 3 except hours_window and hard_rule, and all six scores. Optional: hours_window, hard_rule, ai_usage_level, waits_on, waited_on_by, annoying_task. If the person declines an optional question, record it as null.`;
+Required: all of sections 1 to 3 except hours_window and hard_rule, and all six scores. Optional: hours_window, hard_rule, ai_usage_level, handoffs, annoying_task. If the person declines an optional question, record it as null.`;
 }
 
 export const RECORD_ANSWERS_TOOL = {
@@ -107,8 +108,21 @@ export const RECORD_ANSWERS_TOOL = {
             additionalProperties: false,
           },
           ai_usage_level: { type: "integer", minimum: 0, maximum: 4 },
-          waits_on: { type: ["string", "null"] },
-          waited_on_by: { type: ["string", "null"] },
+          handoffs: {
+            type: "array",
+            maxItems: 6,
+            items: {
+              type: "object",
+              properties: {
+                direction: { type: "string", enum: ["waits_on", "waited_on_by"] },
+                target_kind: { type: "string", enum: ["person", "function", "external"] },
+                target: { type: "string" },
+                what: { type: ["string", "null"] },
+              },
+              required: ["direction", "target_kind", "target", "what"],
+              additionalProperties: false,
+            },
+          },
           annoying_task: { type: ["string", "null"] },
         },
         additionalProperties: false,
