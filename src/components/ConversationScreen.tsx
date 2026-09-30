@@ -1,4 +1,4 @@
-import { SECTIONS, formatChip, type Confidence, type OperatingMap } from "@/lib/schema";
+import { SECTIONS, formatChip, formatHandoff, type FieldKey, type Confidence, type OperatingMap } from "@/lib/schema";
 
 interface Props {
   fields: OperatingMap;
@@ -73,7 +73,11 @@ export function ConversationScreen({
       <div className="flex-1 space-y-4 overflow-y-auto">
         {SECTIONS.map((section) => {
           const chips = section.fields
-            .map((key) => ({ key, text: formatChip(key, fields[key]) }))
+            .flatMap((key): { key: FieldKey; id: string; text: string | null }[] =>
+              key === "handoffs"
+                ? (fields.handoffs ?? []).map((h, i) => ({ key, id: `handoffs-${i}`, text: formatHandoff(h) }))
+                : [{ key, id: key as string, text: formatChip(key, fields[key]) }],
+            )
             .filter((c) => c.text);
           return (
             <div key={section.id}>
@@ -84,7 +88,7 @@ export function ConversationScreen({
                 ) : (
                   chips.map((chip) => (
                     <span
-                      key={chip.key}
+                      key={chip.id}
                       className={`rounded-full bg-cream-deep px-3 py-1 text-xs text-ink ${
                         confidence[chip.key] === "low"
                           ? "border border-dashed border-terracotta"

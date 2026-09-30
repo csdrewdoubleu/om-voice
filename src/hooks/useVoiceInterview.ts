@@ -7,6 +7,7 @@ import {
   normaliseTool,
   sectionOf,
   validateField,
+  normaliseHandoffs,
   type Confidence,
   type FieldKey,
   type OperatingMap,
@@ -151,6 +152,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
           .filter((t): t is string => typeof t === "string")
           .map(normaliseTool);
       }
+      if (key === "handoffs") value = normaliseHandoffs(raw);
       if (key === "rekey_pair" && Array.isArray(raw)) {
         value = (raw as unknown[]).map((t) => (typeof t === "string" ? normaliseTool(t) : t));
       }

@@ -10,6 +10,7 @@ import {
   fullFields,
   fullKeyed,
   sectionsCompleted,
+  estimateCost,
   type Confidence,
   type EndedBy,
   type FieldKey,
@@ -207,6 +208,8 @@ function Index() {
     quotes: fullKeyed(reviewQuotes as Partial<Record<string, string>>),
     edited_fields: edited,
     sections_completed: sectionsCompleted(reviewFields, endedBy),
+    estimated_cost: estimateCost(durationSeconds),
+    estimated_cost_note: "session time only; backend tokens excluded",
   });
 
   const handleDownload = () => {
@@ -234,7 +237,7 @@ function Index() {
       quotes: x.quotes as never,
       edited_fields: x.edited_fields,
       sections_completed: x.sections_completed,
-      estimated_cost: Math.round((x.duration_seconds / 60) * 0.05 * 10000) / 10000,
+      estimated_cost: x.estimated_cost,
     } as never);
     setSaving(false);
     if (error) {
@@ -290,6 +293,7 @@ function Index() {
     <DoneScreen
       minutes={Math.max(1, Math.round(durationSeconds / 60))}
       editedCount={edited.length}
+      cost={estimateCost(durationSeconds)}
       onRestart={restart}
     />
   );

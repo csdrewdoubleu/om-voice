@@ -136,6 +136,75 @@ export const AI_USAGE_LABELS = [
 
 export type Scores = Partial<Record<ScoreKey, number>>;
 
+export const HANDOFF_DIRECTIONS = ["waits_on", "waited_on_by"] as const;
+export const HANDOFF_KINDS = ["person", "function", "external"] as const;
+export interface Handoff {
+  direction: (typeof HANDOFF_DIRECTIONS)[number];
+  target_kind: (typeof HANDOFF_KINDS)[number];
+  target: string;
+  what: string | null;
+}
+
+const FUNCTION_ALIASES: Record<string, string> = {
+  "product team": "Product & Engineering", product: "Product & Engineering",
+  engineering: "Product & Engineering", engineers: "Product & Engineering", dev: "Product & Engineering",
+  developers: "Product & Engineering", "the partners": "Leadership", partners: "Leadership",
+  founders: "Leadership", leadership: "Leadership", management: "Leadership", execs: "Leadership",
+  accounting: "Finance & Admin", finance: "Finance & Admin", admin: "Finance & Admin",
+  bookkeeping: "Finance & Admin", "the front desk": "Operations", "front desk": "Operations",
+  ops: "Operations", operations: "Operations", sales: "Sales", "sales team": "Sales",
+  marketing: "Marketing", "marketing team": "Marketing", support: "Client service",
+  "customer service": "Client service", "client service": "Client service", "account managers": "Client service",
+};
+
+/** Maps a department description to a function value, or null. */
+export function mapFunction(raw: string): string | null {
+  const t = raw.trim().toLowerCase().replace(/^the /, "").replace(/ (team|department|dept|folks|people)$/, "");
+  const exact = FUNCTIONS.find((f) => f.toLowerCase() === raw.trim().toLowerCase());
+  if (exact) return exact;
+  return FUNCTION_ALIASES[t] ?? FUNCTION_ALIASES[raw.trim().toLowerCase()] ?? FUNCTION_ALIASES[`the ${t}`] ?? null;
+}
+
+/** Normalises function targets before validation. */
+export function normaliseHandoffs(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return raw.map((h) => {
+    if (!h || typeof h !== "object") return h;
+    const e = { ...(h as Record<string, unknown>) } as { target?: unknown; target_kind?: unknown; what?: unknown };
+    if (typeof e.target === "string") e.target = e.target.trim();
+    if (e.target_kind === "function" && typeof e.target === "string")
+      e.target = mapFunction(e.target) ?? e.target;
+    if (typeof e.what === "string") e.what = e.what.trim() || null;
+    if (e.what === undefined) e.what = null;
+    return e;
+  });
+}
+
+export function handoffReason(value: unknown): string | null {
+  if (!Array.isArray(value)) return "handoffs must be an array";
+  if (value.length > 6) return "at most six hand-offs";
+  for (const h of value as { direction?: unknown; target_kind?: unknown; target?: unknown; what?: unknown }[]) {
+    if (!h || typeof h !== "object") return "each hand-off must be an object";
+    if (!(HANDOFF_DIRECTIONS as readonly unknown[]).includes(h.direction)) return "direction must be waits_on or waited_on_by";
+    if (!(HANDOFF_KINDS as readonly unknown[]).includes(h.target_kind)) return "target_kind must be person, function or external";
+    if (typeof h.target !== "string" || !h.target.trim()) return "target is required";
+    if (h.target_kind === "function" && !(FUNCTIONS as readonly string[]).includes(h.target))
+      return `"${h.target}" is not a function value; use one of ${FUNCTIONS.join(", ")}`;
+    if (h.target_kind === "person" && !/^[\p{L}][\p{L}'-]*$/u.test(h.target))
+      return "a person target must be a single first name";
+    if (h.target_kind === "external" && (h.target.length > 40 || h.target.split(/\s+/).length > 5))
+      return "an external target must be a short label, not a sentence";
+    if (h.what !== null && (typeof h.what !== "string" || h.what.length >= 80))
+      return "what must be a short phrase under 80 characters, or null";
+  }
+  return null;
+}
+
+export function formatHandoff(h: Handoff): string {
+  const what = h.what ? `: ${h.what}` : "";
+  return h.direction === "waits_on" ? `waits on ${h.target}${what}` : `${h.target} waits on you${what}`;
+}
+
 export interface OperatingMap {
   first_name?: string;
   role_title?: string;
@@ -153,8 +222,7 @@ export interface OperatingMap {
   hard_rule?: string | null;
   scores?: Scores;
   ai_usage_level?: number;
-  waits_on?: string | null;
-  waited_on_by?: string | null;
+  handoffs?: Handoff[];
   annoying_task?: string | null;
 }
 
@@ -180,8 +248,7 @@ export const FIELD_LABELS: Record<FieldKey, string> = {
   hard_rule: "Hard rule",
   scores: "Working style",
   ai_usage_level: "AI usage",
-  waits_on: "Waits on",
-  waited_on_by: "Waited on by",
+  handoffs: "Hand-offs",
   annoying_task: "Annoying task",
 };
 
@@ -204,7 +271,7 @@ export const SECTIONS: Section[] = [
     fields: ["channel_routine", "channel_sameday", "channel_urgent", "hours_window", "hard_rule"],
   },
   { id: "style", label: "Working style", fields: ["scores", "ai_usage_level"] },
-  { id: "handoffs", label: "Hand-offs", fields: ["waits_on", "waited_on_by", "annoying_task"] },
+  { id: "handoffs", label: "Hand-offs", fields: ["handoffs", "annoying_task"] },
 ];
 
 export const ALL_FIELDS: FieldKey[] = SECTIONS.flatMap((s) => s.fields);
@@ -248,10 +315,12 @@ export function validateField(key: string, value: unknown): ValidationFailure | 
       return typeof value === "string" && value.trim().length > 0 ? null : bad(key);
     case "first_name":
     case "hard_rule":
-    case "waits_on":
-    case "waited_on_by":
     case "annoying_task":
       return value === null || typeof value === "string" ? null : bad(key);
+    case "handoffs": {
+      const reason = handoffReason(value);
+      return reason ? { field: "handoffs", reason } : null;
+    }
     case "tools":
       if (!Array.isArray(value) || value.some((t) => typeof t !== "string")) return bad(key);
       return null;
@@ -305,7 +374,7 @@ export function formatChip(key: FieldKey, value: unknown): string | null {
     const pair = value as [string, string];
     return `${label}: ${pair[0]} to ${pair[1]}`;
   }
-  if (key === "scores") return null;
+  if (key === "scores" || key === "handoffs") return null;
   if (key === "ai_usage_level") return `${label}: ${AI_USAGE_LABELS[value as number] ?? value}`;
   return `${label}: ${String(value)}`;
 }
@@ -316,8 +385,7 @@ export function emptyMap(firstName: string): OperatingMap {
 
 export const OPTIONAL_FIELDS: FieldKey[] = [
   "ai_usage_level",
-  "waits_on",
-  "waited_on_by",
+  "handoffs",
   "annoying_task",
   "rekey_pair",
   "hours_window",
@@ -375,6 +443,13 @@ export interface SessionExport {
   quotes: Record<string, string | null>;
   edited_fields: string[];
   sections_completed: string[];
+  estimated_cost: number;
+  estimated_cost_note: string;
+}
+
+/** Voice session time only; backend tokens excluded. */
+export function estimateCost(durationSeconds: number): number {
+  return Math.round((durationSeconds / 60) * 0.05 * 1000) / 1000;
 }
 
 /** Every schema key present; null where nothing was captured. Scores always carry all six dimensions. */
