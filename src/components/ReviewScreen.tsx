@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   AI_USAGE_LABELS,
   CHANNELS,
@@ -14,6 +15,11 @@ import {
   TOOL_CATALOG,
   WORK_MODES,
   enumFor,
+  formatHandoff,
+  handoffReason,
+  normaliseHandoffs,
+  HANDOFF_KINDS,
+  type Handoff,
   type Confidence,
   type FieldKey,
   type OperatingMap,
@@ -58,6 +64,115 @@ function FieldShell({
         {flagged ? <span className="label-mono text-terracotta">check this</span> : null}
       </div>
       <div className="mt-2">{children}</div>
+    </div>
+  );
+}
+
+const blankHandoff: Handoff = { direction: "waits_on", target_kind: "person", target: "", what: null };
+
+function HandoffEditor({ value, onChange }: { value: Handoff[]; onChange: (v: Handoff[]) => void }) {
+  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [draft, setDraft] = useState<Handoff>(blankHandoff);
+  const [error, setError] = useState<string | null>(null);
+
+  const open = (i: number | "new") => {
+    setDraft(i === "new" ? blankHandoff : value[i]!);
+    setError(null);
+    setEditing(i);
+  };
+  const commit = () => {
+    const [entry] = normaliseHandoffs([draft]) as Handoff[];
+    const next = editing === "new" ? [...value, entry!] : value.map((h, i) => (i === editing ? entry! : h));
+    const reason = handoffReason(next);
+    if (reason) return setError(reason);
+    onChange(next);
+    setEditing(null);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {value.map((h, i) => (
+          <span key={i} className="flex items-center gap-1 rounded-full border border-border bg-cream-deep py-1 pl-3 pr-1 text-xs text-ink">
+            <button type="button" onClick={() => open(i)} className="text-left">
+              {formatHandoff(h)}
+            </button>
+            <button
+              type="button"
+              aria-label={`Remove ${formatHandoff(h)}`}
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+              className="rounded-full px-1.5 text-muted-foreground hover:text-terracotta"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        {value.length < 6 && editing === null ? (
+          <button type="button" onClick={() => open("new")} className="rounded-full border border-dashed border-forest px-3 py-1 text-xs text-forest">
+            Add hand-off
+          </button>
+        ) : null}
+      </div>
+      {editing !== null ? (
+        <div className="surface space-y-2 p-3">
+          <div className="flex gap-2">
+            <select
+              value={draft.direction}
+              onChange={(e) => setDraft({ ...draft, direction: e.target.value as Handoff["direction"] })}
+              className={inputClass}
+            >
+              <option value="waits_on">I wait on them</option>
+              <option value="waited_on_by">They wait on me</option>
+            </select>
+            <select
+              value={draft.target_kind}
+              onChange={(e) =>
+                setDraft({ ...draft, target_kind: e.target.value as Handoff["target_kind"], target: "" })
+              }
+              className={inputClass}
+            >
+              {HANDOFF_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k === "function" ? "team" : k}
+                </option>
+              ))}
+            </select>
+          </div>
+          {draft.target_kind === "function" ? (
+            <select value={draft.target} onChange={(e) => setDraft({ ...draft, target: e.target.value })} className={inputClass}>
+              <option value="">Pick a team</option>
+              {FUNCTIONS.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={draft.target}
+              placeholder={draft.target_kind === "person" ? "First name" : "clients, the bank"}
+              onChange={(e) => setDraft({ ...draft, target: e.target.value })}
+              className={inputClass}
+            />
+          )}
+          <input
+            value={draft.what ?? ""}
+            placeholder="For what, e.g. approvals"
+            maxLength={79}
+            onChange={(e) => setDraft({ ...draft, what: e.target.value || null })}
+            className={inputClass}
+          />
+          {error ? <p className="text-xs text-terracotta">{error}</p> : null}
+          <div className="flex gap-2">
+            <button type="button" onClick={commit} className="btn-base btn-primary flex-1">
+              Done
+            </button>
+            <button type="button" onClick={() => setEditing(null)} className="btn-base btn-outline flex-1">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -144,6 +259,17 @@ export function ReviewScreen({
               );
             })}
           </div>
+        </FieldShell>
+      );
+    }
+
+    if (key === "handoffs") {
+      return (
+        <FieldShell key={key} label={label} flagged={flagged(key)}>
+          <HandoffEditor
+            value={fields.handoffs ?? []}
+            onChange={(v) => onChange("handoffs", v)}
+          />
         </FieldShell>
       );
     }
