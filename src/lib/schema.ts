@@ -429,7 +429,141 @@ export function sectionOf(key: string): string | undefined {
   return SECTIONS.find((s) => s.fields.includes(base as FieldKey))?.id;
 }
 
-export type EndedBy = "wrap" | "finish_early" | "finish_early_voice" | "cap" | "dropped";
+export type EndedBy =
+  | "wrap"
+  | "wrap_unconfirmed"
+  | "finish_early"
+  | "finish_early_voice"
+  | "cap"
+  | "dropped";
+
+export interface ToolLogEntry {
+  at: number;
+  tool: string;
+  keys: string[];
+  ok: boolean;
+  rejected: ValidationFailure[];
+}
+
+export interface ErrorEntry {
+  at: number;
+  where: string;
+  message: string;
+}
+
+export interface RecordInput {
+  fields?: Record<string, unknown> | null;
+  confidence?: Record<string, unknown> | null;
+  quotes?: Record<string, unknown> | null;
+}
+
+export interface RecordOutcome {
+  next: OperatingMap;
+  confidence: Confidence;
+  quotes: Quotes;
+  result: {
+    ok: boolean;
+    captured: string[];
+    rejected: ValidationFailure[];
+    missing_in_section: string[];
+    missing_required: string[];
+    note?: string;
+  };
+  section: string;
+}
+
+/**
+ * Applies one record_answers call. Every valid field is recorded; only invalid
+ * fields are rejected. A missing or null handoffs means no hand-offs in this call.
+ */
+export function applyRecordAnswers(
+  prev: OperatingMap,
+  args: RecordInput,
+  firstName: string,
+  currentSection: string,
+): RecordOutcome {
+  const incoming: Record<string, unknown> =
+    args && typeof args.fields === "object" && args.fields !== null ? { ...args.fields } : {};
+  delete incoming["first_name"];
+  if (incoming["handoffs"] === null || incoming["handoffs"] === undefined) delete incoming["handoffs"];
+  const confIn = (args?.confidence ?? {}) as Record<string, unknown>;
+  const quoteIn = (args?.quotes ?? {}) as Record<string, unknown>;
+
+  const captured: string[] = [];
+  const rejected: ValidationFailure[] = [];
+  const notes: string[] = [];
+  const confidence: Confidence = {};
+  const quotes: Quotes = {};
+  const next: OperatingMap = { ...prev, first_name: firstName };
+
+  for (const [key, raw] of Object.entries(incoming)) {
+    let value = raw;
+    try {
+      if (key === "tools" && Array.isArray(raw)) {
+        value = raw.filter((t): t is string => typeof t === "string").map(normaliseTool);
+      }
+      if (key === "handoffs") value = normaliseHandoffs(raw);
+      if (key === "rekey_pair" && Array.isArray(raw)) {
+        value = raw.map((t) => (typeof t === "string" ? normaliseTool(t) : t));
+      }
+      const failure = validateField(key, value);
+      if (failure) {
+        rejected.push({
+          field: failure.field,
+          reason:
+            key === "rekey_pair"
+              ? "rekey_pair must be a two-item array of tool names, or null"
+              : failure.reason,
+        });
+        continue;
+      }
+    } catch (e) {
+      rejected.push({ field: key, reason: e instanceof Error ? e.message : "could not read this value" });
+      continue;
+    }
+    const k = key as FieldKey;
+    if (k === "scores") {
+      next.scores = { ...(next.scores ?? {}), ...(value as Record<string, number>) } as Scores;
+    } else if (k === "tools") {
+      next.tools = [...new Set([...(next.tools ?? []), ...(value as string[])])];
+    } else {
+      (next as Record<string, unknown>)[k] = value;
+    }
+    captured.push(key);
+    const conf = confIn[key];
+    if (conf === "high" || conf === "low") confidence[k] = conf;
+    const quote = quoteIn[key];
+    if (typeof quote === "string" && quote) quotes[key] = quote;
+  }
+
+  if (Array.isArray(next.rekey_pair)) {
+    const tools = [...(next.tools ?? [])];
+    for (const t of next.rekey_pair) {
+      if (!tools.includes(t)) {
+        tools.push(t);
+        notes.push(`added ${t} to tools`);
+      }
+    }
+    next.tools = tools;
+  }
+
+  const lastKey = captured[captured.length - 1];
+  const section = (lastKey && sectionOf(lastKey)) || currentSection;
+  return {
+    next,
+    confidence,
+    quotes,
+    section,
+    result: {
+      ok: captured.length > 0,
+      captured,
+      rejected,
+      missing_in_section: missingInSection(next, section),
+      missing_required: missingRequired(next),
+      ...(notes.length ? { note: notes.join("; ") } : {}),
+    },
+  };
+}
 
 export interface SessionExport {
   session_id: string;
@@ -445,6 +579,8 @@ export interface SessionExport {
   sections_completed: string[];
   estimated_cost: number;
   estimated_cost_note: string;
+  tool_log: ToolLogEntry[];
+  errors: ErrorEntry[];
 }
 
 /** Voice session time only; backend tokens excluded. */
