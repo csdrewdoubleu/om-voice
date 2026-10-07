@@ -668,3 +668,49 @@ export function requiredKeyLabel(key: string): string {
   }
   return (FIELD_LABELS[key as FieldKey] ?? key).toLowerCase();
 }
+
+/** Plain names for optional fields, for the "Also still empty" line. */
+export const OPTIONAL_LABELS: Record<string, string> = {
+  hours_window: "hours",
+  hard_rule: "hard rule",
+  rekey_pair: "copying between tools",
+  ai_usage_level: "AI use",
+  handoffs: "hand-offs",
+  annoying_task: "annoying task",
+};
+
+/** Play-back values from the record: urgent channel, hard rule, two strongest working-style answers. */
+export function playbackNote(map: OperatingMap): string {
+  const urgent = map.channel_urgent ? String(map.channel_urgent) : "not given";
+  const rule =
+    typeof map.hard_rule === "string" && map.hard_rule.trim()
+      ? map.hard_rule
+      : map.hard_rule === null
+        ? "none, they said there isn't one"
+        : "not given";
+  const scored = SCORE_KEYS.filter((k) => typeof map.scores?.[k] === "number")
+    .map((k) => ({ k, v: map.scores![k] as number }))
+    .sort((a, b) => Math.abs(b.v - 50) - Math.abs(a.v - 50))
+    .slice(0, 2);
+  const style = (i: number) => {
+    const s = scored[i];
+    if (!s) return "not given";
+    if (s.v === 50) return `${SCORE_POLES[s.k].label.toLowerCase()}: depends`;
+    const pole = s.v < 50 ? SCORE_POLES[s.k].low : SCORE_POLES[s.k].high;
+    const strength = s.v === 0 || s.v === 100 ? "strongly" : "leans";
+    return `${strength}: "${pole}"`;
+  };
+  return `Play-back note. Urgent channel: ${urgent}. Hard rule: ${rule}. Working style 1: ${style(0)}. Working style 2: ${style(1)}.`;
+}
+
+/** The note sent to the interviewer after a save: required line, optional line, play-back once all required are in. */
+export function statusNote(map: OperatingMap): string {
+  const missing = missingRequired(map);
+  const lines = [
+    missing.length ? `Still needed: ${missing.map(requiredKeyLabel).join(", ")}.` : "All required answers are in.",
+  ];
+  const empty = OPTIONAL_FIELDS.filter((k) => !isCaptured(map, k)).map((k) => OPTIONAL_LABELS[k] ?? k);
+  if (empty.length) lines.push(`Also still empty: ${empty.join(", ")}.`);
+  if (!missing.length) lines.push(playbackNote(map));
+  return lines.join("\n");
+}
