@@ -178,9 +178,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const recordSeqRef = useRef(0);
   const lastMissingNoteRef = useRef<string | null>(null);
   const pendingNotesRef = useRef<{ status?: { text: string; logNote: string }; time?: { text: string; logNote: string } }>({});
-  const agentTurnOpenRef = useRef(false);
-  const lastPersonSoundRef = useRef(0);
-  const personTurnOpenRef = useRef(false);
+  const turnRef = useRef<TurnState>({ lastAgent: 0, lastPerson: 0, agentTurnOpen: false, personTurnOpen: false, nudged: false });
+  const lastOutputDeltaRef = useRef(-1e9);
+  const lastInputDeltaRef = useRef(-1e9);
   // Backend responses that received tool results and need a continue.
   const needsContinueRef = useRef<Set<string>>(new Set());
   const callResponseRef = useRef<Map<string, string>>(new Map());
@@ -355,6 +355,20 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   };
   const flushNotesRef = useRef(flushNotes);
   flushNotesRef.current = flushNotes;
+  const queueNoteRef = useRef(queueNote);
+  queueNoteRef.current = queueNote;
+
+  /** Stall guard: the person stopped and the interviewer has said nothing for a while. */
+  const nudge = () => {
+    if (endingRef.current || finishedRef.current) return;
+    const { status: s, time: t } = pendingNotesRef.current;
+    pendingNotesRef.current = {};
+    const parts = [s?.text, t?.text, "The person has finished speaking. Respond to them now."].filter(Boolean);
+    sendLiveNoteRef.current(parts.join("\n"));
+    logAppEvent("app.nudge", s || t ? "with held notes" : "");
+  };
+  const nudgeRef = useRef(nudge);
+  nudgeRef.current = nudge;
 
   /** After each save, queue a status note if its text changed. */
   const noteMissing = () => {
@@ -582,11 +596,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         if (event["delta"].trim() && !endingRef.current) {
           appendTranscript("person", event["delta"]);
           personSpokeRef.current = true;
+          lastInputDeltaRef.current = performance.now();
         }
         return;
       }
       if (type === "session.output_transcript.delta" && typeof event["delta"] === "string") {
         appendTranscript("interviewer", event["delta"]);
+        lastOutputDeltaRef.current = performance.now();
         outputTranscriptRef.current = (outputTranscriptRef.current + event["delta"]).slice(-400);
         if (!closingHeardRef.current && CLOSING_LINE.test(outputTranscriptRef.current)) {
           closingHeardRef.current = true;
@@ -767,6 +783,18 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         const personLevel = micA ? rms(micA, buffer) : 0;
         const now = performance.now();
         if (agentLevel > SPEAKING_LEVEL) lastAgentSoundRef.current = now;
+        if (startedRef.current && !endingRef.current) {
+          const step = turnStep(
+            turnRef.current,
+            now,
+            agentLevel > SPEAKING_LEVEL || now - lastOutputDeltaRef.current < 150,
+            personLevel > SPEAKING_LEVEL || now - lastInputDeltaRef.current < 150,
+            AGENT_TURN_END_MS,
+            STALL_NUDGE_MS,
+          );
+          if (step.flush) flushNotesRef.current("after interviewer turn");
+          if (step.nudge) nudgeRef.current();
+        }
         const agentActive = now - lastAgentSoundRef.current < 400;
         if (agentActive) {
           setSpeaker("agent");
@@ -799,14 +827,18 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       if (next === REQUIRED_ONLY_SECONDS) {
         const missing = missingRequired(fieldsRef.current);
         if (missing.length) {
-          sendLiveNote(
+          queueNoteRef.current(
+            "time",
             `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
+            "time: 5:00",
           );
         }
       }
       if (next === FORCE_WRAP_SECONDS) {
-        sendLiveNote(
+        queueNoteRef.current(
+          "time",
           "Six and a half minutes have passed. Begin the wrap now and keep it brief.",
+          "time: 6:30",
         );
       }
       if (next === WATCHDOG_SECONDS && !recordedOkRef.current && !watchdogLoggedRef.current) {
