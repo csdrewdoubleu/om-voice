@@ -858,3 +858,54 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     toggleMute,
   };
 }
+
+/**
+ * Turn tracking for note delivery and the stall guard. Pure, so it can be
+ * replayed against recorded timings. Returns what to do at this instant.
+ */
+export interface TurnState {
+  lastAgent: number;
+  lastPerson: number;
+  agentTurnOpen: boolean;
+  personTurnOpen: boolean;
+  nudged: boolean;
+}
+export function turnStep(
+  s: TurnState,
+  now: number,
+  agentSound: boolean,
+  personSound: boolean,
+  agentTurnEndMs = 700,
+  stallMs = 4000,
+): { flush: boolean; nudge: boolean } {
+  if (agentSound) {
+    s.lastAgent = now;
+    s.agentTurnOpen = true;
+    s.personTurnOpen = false;
+  }
+  if (personSound) {
+    s.lastPerson = now;
+    s.personTurnOpen = true;
+    s.nudged = false;
+  }
+  let flush = false;
+  let nudge = false;
+  const personQuiet = now - s.lastPerson >= 300;
+  // Safe moment: the interviewer just finished a spoken turn and the person isn't talking.
+  if (s.agentTurnOpen && now - s.lastAgent >= agentTurnEndMs && personQuiet) {
+    s.agentTurnOpen = false;
+    flush = true;
+  }
+  // Stall: person stopped, interviewer has said nothing since, for stallMs.
+  if (
+    s.personTurnOpen &&
+    !s.nudged &&
+    !s.agentTurnOpen &&
+    now - s.lastPerson >= stallMs &&
+    now - s.lastAgent >= stallMs
+  ) {
+    s.nudged = true;
+    nudge = true;
+  }
+  return { flush, nudge };
+}
