@@ -663,7 +663,8 @@ export function sectionsCompleted(map: OperatingMap, endedBy: EndedBy): string[]
 export function requiredKeyLabel(key: string): string {
   if (key.startsWith("scores.")) {
     const d = key.slice(7) as ScoreKey;
-    return (SCORE_POLES[d]?.label ?? d).toLowerCase();
+    const pole = SCORE_POLES[d];
+    return pole ? `${pole.label.toLowerCase()} (${pole.low} or ${pole.high})` : d;
   }
   return (FIELD_LABELS[key as FieldKey] ?? key).toLowerCase();
 }
