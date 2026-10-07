@@ -4,8 +4,11 @@ import { createLiveSession } from "@/lib/live.functions";
 import {
   applyRecordAnswers,
   missingRequired,
+  EVENT_LOG_CAP,
   type ErrorEntry,
+  type EventLogEntry,
   type RecordInput,
+  type SessionConfigSummary,
   type ToolLogEntry,
   type Confidence,
   type FieldKey,
@@ -20,6 +23,71 @@ const SPEAKING_LEVEL = 0.06;
 const UNCONFIRMED_WRAP_MS = 10000;
 const WATCHDOG_SECONDS = 120;
 const CLOSING_LINE = /next screen/i;
+
+const str = (v: unknown) => (typeof v === "string" ? v : "");
+const safeText = (text: string) =>
+  text.replace(/(sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+)/g, "[redacted]").slice(0, 300);
+
+/**
+ * Turn a received event into a log line with no spoken words, audio, or keys.
+ * Returns null for audio chunks. `merge` marks streaming deltas that are folded
+ * into the previous entry of the same type.
+ */
+function describeEvent(
+  event: Record<string, unknown>,
+): { type: string; note: string; chars?: number } | null {
+  const type = str(event["type"]) || "unknown";
+  if (/audio[._]delta|input_audio\.append|audio_buffer/.test(type)) return null;
+  if (type.includes("transcript")) {
+    const who = type.includes("input") ? "person" : type.includes("output") ? "agent" : "unknown";
+    const text = str(event["delta"]) || str(event["transcript"]) || str(event["text"]);
+    return { type, note: who, chars: text.length };
+  }
+  if (type === "error") {
+    const err = (event["error"] ?? {}) as Record<string, unknown>;
+    return { type, note: safeText(str(err["message"]) || str(err["code"]) || "error") };
+  }
+  if (type === "session.started") {
+    const session = (event["session"] ?? {}) as Record<string, unknown>;
+    const deleg = (session["delegation"] ?? null) as Record<string, unknown> | null;
+    const resp = (deleg?.["responses"] ?? {}) as Record<string, unknown>;
+    const tools = Array.isArray(resp["tools"])
+      ? (resp["tools"] as Record<string, unknown>[]).map((t) => str(t["name"]) || str(t["type"])).join(",")
+      : "";
+    return {
+      type,
+      note: `model=${str(session["model"]) || "?"} delegation=${deleg ? str(deleg["type"]) || "?" : "none"} backend=${str(resp["model"]) || "?"} tools=${tools || "none"}`,
+    };
+  }
+  if (type === "session.delegation.created") {
+    const d = (event["delegation"] ?? {}) as Record<string, unknown>;
+    return { type, note: `target=${str(d["target"]) || "?"}` };
+  }
+  if (type === "session.closed") {
+    return { type, note: safeText(str(event["reason"])) };
+  }
+  if (type === "response.event") {
+    const inner = (event["event"] ?? {}) as Record<string, unknown>;
+    const innerType = str(inner["type"]) || "unknown";
+    const full = `response.event/${innerType}`;
+    if (innerType.endsWith(".delta")) {
+      return { type: full, note: "backend", chars: str(inner["delta"]).length };
+    }
+    const item = (inner["item"] ?? {}) as Record<string, unknown>;
+    if (item["type"] === "function_call") {
+      return { type: full, note: `tool=${str(item["name"]) || "?"} status=${str(item["status"]) || (innerType.endsWith("done") ? "done" : "started")}` };
+    }
+    const response = (inner["response"] ?? {}) as Record<string, unknown>;
+    if (innerType === "error" || innerType === "response.failed") {
+      const err = ((innerType === "error" ? inner["error"] : response["error"]) ?? {}) as Record<string, unknown>;
+      return { type: full, note: safeText(str(err["message"]) || "failed") };
+    }
+    if (str(response["status"])) return { type: full, note: `status=${str(response["status"])}` };
+    if (item["type"]) return { type: full, note: `item=${str(item["type"])}` };
+    return { type: full, note: "" };
+  }
+  return { type, note: "" };
+}
 
 export type VoiceStatus = "idle" | "connecting" | "live" | "ended" | "error";
 export type VoiceErrorKind = "mic" | "session" | "connection" | null;
@@ -71,6 +139,15 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const startedAtMsRef = useRef(0);
   const outputTranscriptRef = useRef("");
   const closingHeardRef = useRef(false);
+  const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
+  const [eventLogDropped, setEventLogDropped] = useState(0);
+  const [sessionConfig, setSessionConfig] = useState<SessionConfigSummary | null>(null);
+  const callStartMsRef = useRef(0);
+  const eventLogRef = useRef<EventLogEntry[]>([]);
+  const eventDroppedRef = useRef(0);
+  const mergeRef = useRef<{ type: string; note: string; chars: number; count: number } | null>(null);
+  const elapsedRef = useRef(0);
+  const watchdogLoggedRef = useRef(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -97,12 +174,48 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       if (finishedRef.current) return;
       finishedRef.current = true;
       teardown();
+      flushEventLog();
       setStatus("ended");
       onFinish(reason);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [onFinish],
   );
+
+  function flushEventLog() {
+    setEventLog([...eventLogRef.current]);
+    setEventLogDropped(eventDroppedRef.current);
+  }
+
+  function recordEvent(event: Record<string, unknown>) {
+    const d = describeEvent(event);
+    if (!d) return;
+    const at = callStartMsRef.current
+      ? Math.round((performance.now() - callStartMsRef.current) / 100) / 10
+      : 0;
+    const log = eventLogRef.current;
+    const last = log[log.length - 1];
+    const merge = mergeRef.current;
+    // Fold consecutive streaming deltas of one type into a single entry.
+    if (d.chars !== undefined && merge && last && merge.type === d.type && last.type === d.type) {
+      merge.chars += d.chars;
+      merge.count += 1;
+      last.note = `${merge.note}, ${merge.chars} chars, ${merge.count} events`;
+      return;
+    }
+    if (log.length >= EVENT_LOG_CAP) {
+      eventDroppedRef.current += 1;
+      mergeRef.current = null;
+      return;
+    }
+    if (d.chars !== undefined) {
+      mergeRef.current = { type: d.type, note: d.note, chars: d.chars, count: 1 };
+      log.push({ at, type: d.type, note: `${d.note}, ${d.chars} chars, 1 events` });
+    } else {
+      mergeRef.current = null;
+      log.push({ at, type: d.type, note: d.note });
+    }
+  }
 
   const finishRef = useRef(finish);
   finishRef.current = finish;
@@ -157,7 +270,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
           ? message.message
           : JSON.stringify(message ?? "unknown error");
     // Strip anything that looks like a key or bearer token.
-    const safe = text.replace(/(sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+)/g, "[redacted]").slice(0, 500);
+    const safe = safeText(text);
     console.warn("[voice]", where, safe);
     setErrors((prev) => [...prev, { at: secondsIn(), where, message: safe }]);
   }, []);
@@ -274,6 +387,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         startedRef.current = true;
         startedAtMsRef.current = performance.now();
         setStatus("live");
+        flushEventLog();
         sendLiveNote(
           "Greet the person now in English by first name, in one short sentence, then ask the opening question for section 1. Then pause and listen.",
         );
@@ -351,6 +465,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const start = useCallback(async () => {
     if (status === "connecting" || status === "live") return;
     setStatus("connecting");
+    callStartMsRef.current = performance.now();
     fieldsRef.current = { ...fieldsRef.current, first_name: firstName };
     setFields(fieldsRef.current);
     setErrorKind(null);
@@ -410,7 +525,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       dcRef.current = dc;
       dc.addEventListener("message", (e) => {
         try {
-          handleServerEvent(JSON.parse(e.data as string) as Record<string, unknown>);
+          const parsed = JSON.parse(e.data as string) as Record<string, unknown>;
+          recordEvent(parsed);
+          handleServerEvent(parsed);
         } catch (err) {
           logError("event handler", err);
         }
@@ -449,6 +566,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         fail("session", "Could not start the conversation.");
         return;
       }
+      if (result.sessionConfig) setSessionConfig(result.sessionConfig);
       if (!result.ok || !result.sdp) {
         fail("session", result.error ?? "Could not start the conversation.");
         return;
@@ -497,34 +615,37 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firstName, startSession, handleServerEvent, status]);
 
-  // Elapsed timer plus the hard seven-minute cap.
+  // Elapsed timer plus the hard seven-minute cap. Side effects run outside the
+  // state updater so React's double-invoked updaters can't repeat them.
   useEffect(() => {
     if (status !== "live") return;
     const id = window.setInterval(() => {
-      setElapsed((prev) => {
-        const next = prev + 1;
-        if (next === REQUIRED_ONLY_SECONDS) {
-          const missing = missingRequired(fieldsRef.current);
-          if (missing.length) {
-            sendLiveNote(
-              `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
-            );
-          }
-        }
-        if (next === FORCE_WRAP_SECONDS) {
+      const next = elapsedRef.current + 1;
+      elapsedRef.current = next;
+      setElapsed(next);
+      flushEventLog();
+      if (next === REQUIRED_ONLY_SECONDS) {
+        const missing = missingRequired(fieldsRef.current);
+        if (missing.length) {
           sendLiveNote(
-            "Six and a half minutes have passed. Begin the wrap now and keep it brief. After it, tell the backend the interview is complete.",
+            `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
           );
         }
-        if (next === WATCHDOG_SECONDS && !recordedOkRef.current) {
-          setNothingRecordedWarning(true);
-          setErrors((p) => [...p, { at: WATCHDOG_SECONDS, where: "watchdog", message: "no successful record_answers" }]);
-        }
-        if (next >= HARD_CAP_SECONDS) finish("capped");
-        return next;
-      });
+      }
+      if (next === FORCE_WRAP_SECONDS) {
+        sendLiveNote(
+          "Six and a half minutes have passed. Begin the wrap now and keep it brief. After it, tell the backend the interview is complete.",
+        );
+      }
+      if (next === WATCHDOG_SECONDS && !recordedOkRef.current && !watchdogLoggedRef.current) {
+        watchdogLoggedRef.current = true;
+        setNothingRecordedWarning(true);
+        setErrors((p) => [...p, { at: WATCHDOG_SECONDS, where: "watchdog", message: "no successful record_answers" }]);
+      }
+      if (next >= HARD_CAP_SECONDS) finish("capped");
     }, 1000);
     return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, finish, sendLiveNote]);
 
   useEffect(() => () => teardown(), []);
@@ -552,6 +673,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     speaker,
     toolLog,
     errors,
+    eventLog,
+    eventLogDropped,
+    sessionConfig,
     nothingRecordedWarning,
     start,
     finish,
