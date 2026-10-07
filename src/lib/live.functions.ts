@@ -119,3 +119,71 @@ export const createLiveSession = createServerFn({ method: "POST" })
     }
     return { ok: true, sessionId: payload.session?.id, sdp: payload.transport.sdp, sessionConfig: summary };
   });
+
+// ---- App-driven recording ----
+const MAX_TRANSCRIPT_CHARS = 40000;
+
+export interface TranscriptTurn {
+  role: "person" | "interviewer";
+  text: string;
+}
+
+export interface RecordFromTranscriptResult {
+  ok: boolean;
+  error?: string;
+  /** Arguments of the backend's record_answers call, as JSON text. */
+  argsJson?: string;
+  usage?: { input_tokens: number; output_tokens: number };
+  status?: number;
+}
+
+/**
+ * The app asks the backend model to record from the conversation so far.
+ * Same direct Responses request the extractor was tested with; never depends on the interviewer.
+ */
+export const recordFromTranscript = createServerFn({ method: "POST" })
+  .inputValidator((input: { transcript?: TranscriptTurn[] }) => {
+    if (!Array.isArray(input?.transcript)) throw new Error("A transcript is required");
+    const turns = input.transcript
+      .filter((t) => t && (t.role === "person" || t.role === "interviewer") && typeof t.text === "string")
+      .map((t) => ({ role: t.role, text: t.text.slice(0, 4000) }));
+    return { transcript: turns };
+  })
+  .handler(async ({ data }): Promise<RecordFromTranscriptResult> => {
+    const apiKey = process.env["OPENAI_API_KEY"];
+    if (!apiKey) return { ok: false, error: "The API key is missing." };
+    let text = data.transcript
+      .map((t) => `${t.role === "person" ? "Person" : "Interviewer"}: ${t.text.trim()}`)
+      .join("\n");
+    if (text.length > MAX_TRANSCRIPT_CHARS) text = text.slice(-MAX_TRANSCRIPT_CHARS);
+    if (!text.trim()) return { ok: false, error: "empty transcript" };
+
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: BACKEND_MODEL,
+        instructions: buildBackendPrompt(),
+        input: [{ role: "user", content: `Conversation so far:\n${text}` }],
+        tools: [RECORD_ANSWERS_TOOL],
+        tool_choice: { type: "function", name: "record_answers" },
+        store: false,
+      }),
+    });
+    if (!response.ok) {
+      const body = (await response.text()).slice(0, 300);
+      console.error("record request failed", response.status, body);
+      return { ok: false, status: response.status, error: `backend returned ${response.status}` };
+    }
+    const payload = (await response.json()) as {
+      output?: { type?: string; name?: string; arguments?: string }[];
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const usage = {
+      input_tokens: payload.usage?.input_tokens ?? 0,
+      output_tokens: payload.usage?.output_tokens ?? 0,
+    };
+    const call = payload.output?.find((o) => o.type === "function_call" && o.name === "record_answers");
+    if (!call?.arguments) return { ok: false, usage, status: 200, error: "no record_answers call" };
+    return { ok: true, usage, status: 200, argsJson: call.arguments };
+  });

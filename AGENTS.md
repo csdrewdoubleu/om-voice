@@ -11,6 +11,7 @@
 
 ## Architecture
 - Voice uses OpenAI GPT-Live (`gpt-live-1`) with Responses delegation; the server fn `src/lib/live.functions.ts` does the SDP exchange at `POST /v1/live/sessions` so the API key never reaches the browser.
-- Two prompts in `src/lib/prompt.ts`: a live voice prompt (no tool mechanics) and a backend extractor prompt that owns `record_answers`/`finish_session`.
+- Recording is app-driven: `recordFromTranscript` in `src/lib/live.functions.ts` sends the client-kept transcript to the backend model every 30s (if the person spoke) and once at call end, one request at a time; the interviewer never hands off and the call ends when the app hears a fixed spoken line containing "next screen". Why: the interviewer handed off in under half of test runs.
+- Two prompts in `src/lib/prompt.ts`: a live voice prompt (no tool mechanics, fixed closing/stopping lines) and a backend extractor prompt that re-reads the whole conversation each request.
 - Tool calls arrive nested in `response.event`; the client replies with `response.item.create` and continues with `response.create` after the backend response completes.
 - Every received session event goes through describeEvent in useVoiceInterview.ts into event_log (capped, streaming deltas folded, no words/audio/keys); the server fn returns a key-free session_config summary. Why: recording failures must be diagnosable from the export alone.
