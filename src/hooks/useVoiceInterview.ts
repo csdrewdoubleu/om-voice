@@ -4,7 +4,7 @@ import { createLiveSession, recordFromTranscript, type RecordFromTranscriptResul
 import {
   applyRecordAnswers,
   missingRequired,
-  requiredKeyLabel,
+  statusNote,
   EVENT_LOG_CAP,
   type ErrorEntry,
   type EventLogEntry,
@@ -19,7 +19,11 @@ import {
 
 // ---- Settings ----
 const SILENCE_AFTER_CLOSING_MS = 1500;
-const FINAL_RECORD_TIMEOUT_MS = 8000;
+const FINAL_RECORD_TIMEOUT_MS = 15000;
+/** Interviewer quiet this long after speaking counts as the end of its turn. */
+const AGENT_TURN_END_MS = 700;
+/** Person stopped and interviewer silent this long: nudge the interviewer. */
+const STALL_NUDGE_MS = 4000;
 const RECORD_INTERVAL_SECONDS = 30;
 const SPEAKING_LEVEL = 0.06;
 const WATCHDOG_SECONDS = 120;
@@ -173,7 +177,10 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const recordInFlightRef = useRef<Promise<boolean> | null>(null);
   const recordSeqRef = useRef(0);
   const lastMissingNoteRef = useRef<string | null>(null);
-  const allInSentRef = useRef(false);
+  const pendingNotesRef = useRef<{ status?: { text: string; logNote: string }; time?: { text: string; logNote: string } }>({});
+  const agentTurnOpenRef = useRef(false);
+  const lastPersonSoundRef = useRef(0);
+  const personTurnOpenRef = useRef(false);
   // Backend responses that received tool results and need a continue.
   const needsContinueRef = useRef<Set<string>>(new Set());
   const callResponseRef = useRef<Map<string, string>>(new Map());
@@ -326,21 +333,37 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     [firstName],
   );
 
-  /** Tell the interviewer what is still required, only when the list changes. */
+  /**
+   * Queue a note for the interviewer. Notes are held until the interviewer
+   * finishes a spoken turn; a newer note of the same kind replaces a waiting one.
+   */
+  const queueNote = (kind: "status" | "time", text: string, logNote: string) => {
+    if (endingRef.current || finishedRef.current) return;
+    if (pendingNotesRef.current[kind]) logAppEvent("app.note.replaced", kind);
+    pendingNotesRef.current[kind] = { text, logNote };
+    logAppEvent("app.note.held", logNote);
+  };
+
+  /** Deliver waiting notes as one instruction. Only called at a safe moment. */
+  const flushNotes = (why: string) => {
+    const { status: s, time: t } = pendingNotesRef.current;
+    if (!s && !t) return;
+    pendingNotesRef.current = {};
+    if (endingRef.current || finishedRef.current) return;
+    sendLiveNoteRef.current([s?.text, t?.text].filter(Boolean).join("\n"));
+    logAppEvent("app.note", `${[s?.logNote, t?.logNote].filter(Boolean).join("; ")} (${why})`);
+  };
+  const flushNotesRef = useRef(flushNotes);
+  flushNotesRef.current = flushNotes;
+
+  /** After each save, queue a status note if its text changed. */
   const noteMissing = () => {
     if (endingRef.current || finishedRef.current) return;
+    const text = statusNote(fieldsRef.current);
+    if (text === lastMissingNoteRef.current) return;
+    lastMissingNoteRef.current = text;
     const missing = missingRequired(fieldsRef.current);
-    const key = missing.join(",");
-    if (key === lastMissingNoteRef.current) return;
-    lastMissingNoteRef.current = key;
-    if (missing.length) {
-      sendLiveNoteRef.current(`Still needed: ${missing.map(requiredKeyLabel).join(", ")}.`);
-      logAppEvent("app.note", `still needed: ${missing.length}`);
-    } else if (!allInSentRef.current) {
-      allInSentRef.current = true;
-      sendLiveNoteRef.current("All required answers are in.");
-      logAppEvent("app.note", "all required answers are in");
-    }
+    queueNote("status", text, missing.length ? `still needed: ${missing.length}` : "all required in + play-back");
   };
 
   /** Merge one record_answers payload, from either source. */
