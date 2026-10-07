@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { createLiveSession } from "@/lib/live.functions";
+import { createLiveSession, recordFromTranscript, type TranscriptTurn } from "@/lib/live.functions";
 import {
   applyRecordAnswers,
   missingRequired,
+  requiredKeyLabel,
   EVENT_LOG_CAP,
   type ErrorEntry,
   type EventLogEntry,
@@ -17,12 +18,13 @@ import {
 } from "@/lib/schema";
 
 // ---- Settings ----
-const SILENCE_AFTER_FINISH_MS = 1500;
-const FINISH_FALLBACK_MS = 8000;
+const SILENCE_AFTER_CLOSING_MS = 1500;
+const FINAL_RECORD_TIMEOUT_MS = 8000;
+const RECORD_INTERVAL_SECONDS = 30;
 const SPEAKING_LEVEL = 0.06;
-const UNCONFIRMED_WRAP_MS = 10000;
 const WATCHDOG_SECONDS = 120;
 const CLOSING_LINE = /next screen/i;
+const STOPPING_LINE = /stop there/i;
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const safeText = (text: string) =>
@@ -121,6 +123,7 @@ function rms(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): number {
 
 export function useVoiceInterview({ firstName, onFinish }: Options) {
   const startSession = useServerFn(createLiveSession);
+  const recordFn = useServerFn(recordFromTranscript);
 
   const [status, setStatus] = useState<VoiceStatus>("idle");
   const [errorKind, setErrorKind] = useState<VoiceErrorKind>(null);
@@ -164,7 +167,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const endReasonRef = useRef<FinishReason>("complete");
   const lastAgentSoundRef = useRef(0);
   const startedRef = useRef(false);
-  const finishToolAtRef = useRef(0);
+  const [saving, setSaving] = useState(false);
+  const transcriptRef = useRef<TranscriptTurn[]>([]);
+  const personSpokeRef = useRef(false);
+  const recordInFlightRef = useRef<Promise<boolean> | null>(null);
+  const recordSeqRef = useRef(0);
+  const lastMissingNoteRef = useRef<string | null>(null);
+  const allInSentRef = useRef(false);
   // Backend responses that received tool results and need a continue.
   const needsContinueRef = useRef<Set<string>>(new Set());
   const callResponseRef = useRef<Map<string, string>>(new Map());
@@ -215,6 +224,27 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       mergeRef.current = null;
       log.push({ at, type: d.type, note: d.note });
     }
+  }
+
+  /** App-side notes in event_log (recording requests and how they ended). */
+  function logAppEvent(type: string, note: string) {
+    const log = eventLogRef.current;
+    mergeRef.current = null;
+    if (log.length >= EVENT_LOG_CAP) {
+      eventDroppedRef.current += 1;
+      return;
+    }
+    const at = callStartMsRef.current
+      ? Math.round((performance.now() - callStartMsRef.current) / 100) / 10
+      : 0;
+    log.push({ at, type, note });
+  }
+
+  function appendTranscript(role: TranscriptTurn["role"], delta: string) {
+    const list = transcriptRef.current;
+    const last = list[list.length - 1];
+    if (last && last.role === role) last.text += delta;
+    else list.push({ role, text: delta });
   }
 
   const finishRef = useRef(finish);
@@ -296,6 +326,140 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     [firstName],
   );
 
+  /** Tell the interviewer what is still required, only when the list changes. */
+  const noteMissing = () => {
+    if (endingRef.current || finishedRef.current) return;
+    const missing = missingRequired(fieldsRef.current);
+    const key = missing.join(",");
+    if (key === lastMissingNoteRef.current) return;
+    lastMissingNoteRef.current = key;
+    if (missing.length) {
+      sendLiveNoteRef.current(`Still needed: ${missing.map(requiredKeyLabel).join(", ")}.`);
+      logAppEvent("app.note", `still needed: ${missing.length}`);
+    } else if (!allInSentRef.current) {
+      allInSentRef.current = true;
+      sendLiveNoteRef.current("All required answers are in.");
+      logAppEvent("app.note", "all required answers are in");
+    }
+  };
+
+  /** Merge one record_answers payload, from either source. */
+  const handleRecordArgs = (parsed: RecordInput, source: "app" | "interviewer") => {
+    const keys =
+      parsed && typeof parsed.fields === "object" && parsed.fields !== null ? Object.keys(parsed.fields) : [];
+    try {
+      const result = applyRecord(parsed);
+      logTool({ tool: "record_answers", keys, ok: result.ok, rejected: result.rejected, source });
+      noteMissing();
+      return result;
+    } catch (e) {
+      logError(`record_answers handler (${source})`, e);
+      logTool({ tool: "record_answers", keys, ok: false, rejected: [], source });
+      return null;
+    }
+  };
+
+  /** One recording request from the app. Never two at once: a due request is skipped if one is running. */
+  const runRecording = async (kind: "interval" | "final"): Promise<boolean> => {
+    if (recordInFlightRef.current) {
+      logAppEvent("app.record.skipped", `${kind}: previous request still running`);
+      return false;
+    }
+    const transcript = transcriptRef.current
+      .filter((t) => t.text.trim())
+      .map((t) => ({ role: t.role, text: t.text }));
+    if (!transcript.some((t) => t.role === "person")) {
+      logAppEvent("app.record.skipped", `${kind}: the person has not spoken yet`);
+      return kind === "final";
+    }
+    personSpokeRef.current = false;
+    const n = (recordSeqRef.current += 1);
+    const t0 = performance.now();
+    logAppEvent("app.record.request", `#${n} ${kind}, ${transcript.length} turns`);
+    const promise = (async () => {
+      try {
+        const r = await recordFn({ data: { transcript } });
+        const ms = Math.round(performance.now() - t0);
+        const tokens = r.usage ? `, in ${r.usage.input_tokens} out ${r.usage.output_tokens} tokens` : "";
+        if (!r.ok || !r.args) {
+          logAppEvent("app.record.failed", `#${n} ${ms}ms ${safeText(r.error ?? "failed")}${tokens}`);
+          logError("app record", r.error ?? "failed");
+          return false;
+        }
+        if (finishedRef.current) {
+          logAppEvent("app.record.late", `#${n} ${ms}ms arrived after the call closed`);
+          return false;
+        }
+        const result = handleRecordArgs(r.args as RecordInput, "app");
+        logAppEvent(
+          "app.record.done",
+          `#${n} ${ms}ms captured ${result?.captured.length ?? 0} rejected ${result?.rejected.length ?? 0}${tokens}`,
+        );
+        return true;
+      } catch (e) {
+        logAppEvent("app.record.failed", `#${n} ${safeText(e instanceof Error ? e.message : "error")}`);
+        logError("app record", e);
+        return false;
+      }
+    })();
+    recordInFlightRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      recordInFlightRef.current = null;
+    }
+  };
+  const runRecordingRef = useRef(runRecording);
+  runRecordingRef.current = runRecording;
+
+  /**
+   * End the call for any reason: stop listening, make one final recording request
+   * (up to 8 seconds, waiting for a running one first), then open review.
+   */
+  const endCall = async (reason: FinishReason) => {
+    if (finishedRef.current || endingRef.current) return;
+    endingRef.current = true;
+    endReasonRef.current = reason;
+    logAppEvent("app.ending", reason);
+    send({ type: "session.input_audio.mute", event_id: "closing_mute" });
+    micRef.current?.getAudioTracks().forEach((t) => {
+      t.enabled = false;
+    });
+    setSaving(true);
+    const t0 = performance.now();
+    const timeout = new Promise<boolean>((resolve) =>
+      window.setTimeout(() => resolve(false), FINAL_RECORD_TIMEOUT_MS),
+    );
+    const final = (async () => {
+      const running = recordInFlightRef.current;
+      if (running) await running.catch(() => false);
+      return runRecordingRef.current("final");
+    })();
+    const ok = await Promise.race([final, timeout]);
+    let finalReason = reason;
+    if (!ok) {
+      logError("final record", "the final recording request failed or timed out");
+      if (reason === "complete" || reason === "voice_early") finalReason = "unconfirmed";
+    }
+    // After a spoken closing, let the voice finish its line (within the same 8 seconds).
+    if (reason === "complete" || reason === "voice_early") {
+      await new Promise<void>((resolve) => {
+        const id = window.setInterval(() => {
+          const now = performance.now();
+          const quiet = now - Math.max(lastAgentSoundRef.current, t0) >= SILENCE_AFTER_CLOSING_MS;
+          if (quiet || now - t0 >= FINAL_RECORD_TIMEOUT_MS) {
+            window.clearInterval(id);
+            resolve();
+          }
+        }, 100);
+      });
+    }
+    setSaving(false);
+    finishRef.current(finalReason);
+  };
+  const endCallRef = useRef(endCall);
+  endCallRef.current = endCall;
+
   /** Steer the live voice directly (time notes, greeting). */
   const sendLiveNote = useCallback(
     (text: string) => {
@@ -308,6 +472,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     },
     [send],
   );
+  const sendLiveNoteRef = useRef(sendLiveNote);
+  sendLiveNoteRef.current = sendLiveNote;
 
   const sendToolResult = useCallback(
     (responseId: string | undefined, callId: string, output: unknown) => {
@@ -330,23 +496,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       handledCallsRef.current.add(callId);
 
       if (name === "finish_session") {
-        let reason = "complete";
-        try {
-          reason = (JSON.parse(argsText || "{}") as { reason?: string }).reason ?? "complete";
-        } catch {
-          /* default to complete */
-        }
-        logTool({ tool: "finish_session", keys: ["reason"], ok: true, rejected: [] });
-        endReasonRef.current = reason === "person_requested" ? "voice_early" : "complete";
-        endingRef.current = true;
-        sendToolResult(responseId, callId, { ok: true });
-        finishToolAtRef.current = performance.now();
-        const fallbackReason = endReasonRef.current;
-        window.setTimeout(() => finishRef.current(fallbackReason), FINISH_FALLBACK_MS);
+        // The app ends the call from the spoken closing line; this is acknowledged only.
+        logTool({ tool: "finish_session", keys: ["reason"], ok: true, rejected: [], source: "interviewer" });
+        sendToolResult(responseId, callId, { ok: true, note: "the app ends the call" });
         return;
       }
       if (name !== "record_answers") {
-        logTool({ tool: String(name), keys: [], ok: false, rejected: [] });
+        logTool({ tool: String(name), keys: [], ok: false, rejected: [], source: "interviewer" });
         sendToolResult(responseId, callId, { ok: false, reason: `unknown function ${name}` });
         return;
       }
@@ -354,27 +510,17 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       try {
         parsed = JSON.parse(argsText || "{}") as RecordInput;
       } catch {
-        logTool({ tool: "record_answers", keys: [], ok: false, rejected: [] });
+        logTool({ tool: "record_answers", keys: [], ok: false, rejected: [], source: "interviewer" });
         logError("record_answers", "arguments were not valid JSON");
         sendToolResult(responseId, callId, { ok: false, reason: "arguments were not valid JSON" });
         return;
       }
-      const keys =
-        parsed && typeof parsed.fields === "object" && parsed.fields !== null ? Object.keys(parsed.fields) : [];
-      try {
-        const result = applyRecord(parsed);
-        logTool({ tool: "record_answers", keys, ok: result.ok, rejected: result.rejected });
-        sendToolResult(responseId, callId, result);
-      } catch (e) {
-        logError("record_answers handler", e);
-        logTool({ tool: "record_answers", keys, ok: false, rejected: [] });
-        sendToolResult(responseId, callId, {
-          ok: false,
-          captured: [],
-          rejected: [],
-          reason: "the app could not process this call",
-        });
-      }
+      const result = handleRecordArgs(parsed, "interviewer");
+      sendToolResult(
+        responseId,
+        callId,
+        result ?? { ok: false, captured: [], rejected: [], reason: "the app could not process this call" },
+      );
     },
     [applyRecord, sendToolResult, logTool, logError],
   );
@@ -394,7 +540,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         return;
       }
       if (type === "session.closed") {
-        if (!finishedRef.current) finishRef.current(endingRef.current ? endReasonRef.current : "dropped");
+        if (!finishedRef.current && !endingRef.current) void endCallRef.current("dropped");
         return;
       }
       if (type === "error") {
@@ -402,17 +548,20 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         logError("live", (err["message"] as string | undefined) ?? err);
         return;
       }
+      if (type === "session.input_transcript.delta" && typeof event["delta"] === "string") {
+        if (event["delta"].trim() && !endingRef.current) {
+          appendTranscript("person", event["delta"]);
+          personSpokeRef.current = true;
+        }
+        return;
+      }
       if (type === "session.output_transcript.delta" && typeof event["delta"] === "string") {
+        appendTranscript("interviewer", event["delta"]);
         outputTranscriptRef.current = (outputTranscriptRef.current + event["delta"]).slice(-400);
         if (!closingHeardRef.current && CLOSING_LINE.test(outputTranscriptRef.current)) {
           closingHeardRef.current = true;
-          // Stop listening so a "thank you" can't start another turn.
-          send({ type: "session.input_audio.mute", event_id: "closing_mute" });
-          window.setTimeout(() => {
-            if (finishedRef.current || endingRef.current) return;
-            logError("finish_session", "no finish_session within 10 seconds of the closing line");
-            finishRef.current("unconfirmed");
-          }, UNCONFIRMED_WRAP_MS);
+          const stopping = STOPPING_LINE.test(outputTranscriptRef.current);
+          void endCallRef.current(stopping ? "voice_early" : "complete");
         }
         return;
       }
@@ -536,7 +685,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
 
       pc.addEventListener("connectionstatechange", () => {
         if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-          finishRef.current(endingRef.current ? endReasonRef.current : "dropped");
+          if (!finishedRef.current && !endingRef.current) void endCallRef.current("dropped");
         }
       });
 
@@ -599,14 +748,6 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
           setSpeaker("idle");
           setLevel(Math.max(agentLevel, personLevel));
         }
-        // After finish_session: close once the voice has been quiet long enough.
-        if (endingRef.current && finishToolAtRef.current) {
-          const quietSince = Math.max(lastAgentSoundRef.current, finishToolAtRef.current);
-          if (now - quietSince >= SILENCE_AFTER_FINISH_MS) {
-            finishRef.current(endReasonRef.current);
-            return;
-          }
-        }
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
@@ -635,7 +776,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       }
       if (next === FORCE_WRAP_SECONDS) {
         sendLiveNote(
-          "Six and a half minutes have passed. Begin the wrap now and keep it brief. After it, tell the backend the interview is complete.",
+          "Six and a half minutes have passed. Begin the wrap now and keep it brief.",
         );
       }
       if (next === WATCHDOG_SECONDS && !recordedOkRef.current && !watchdogLoggedRef.current) {
@@ -643,7 +784,10 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         setNothingRecordedWarning(true);
         setErrors((p) => [...p, { at: WATCHDOG_SECONDS, where: "watchdog", message: "no successful record_answers" }]);
       }
-      if (next >= HARD_CAP_SECONDS) finish("capped");
+      if (next % RECORD_INTERVAL_SECONDS === 0 && personSpokeRef.current && !endingRef.current) {
+        void runRecordingRef.current("interval");
+      }
+      if (next >= HARD_CAP_SECONDS) void endCallRef.current("capped");
     }, 1000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -678,8 +822,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     eventLogDropped,
     sessionConfig,
     nothingRecordedWarning,
+    saving,
     start,
-    finish,
+    finish: (reason: FinishReason) => void endCallRef.current(reason),
     toggleMute,
   };
 }
