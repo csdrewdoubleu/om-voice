@@ -33,7 +33,7 @@ const safeText = (text: string) =>
  * Returns null for audio chunks. `merge` marks streaming deltas that are folded
  * into the previous entry of the same type.
  */
-function describeEvent(
+export function describeEvent(
   event: Record<string, unknown>,
 ): { type: string; note: string; chars?: number } | null {
   const type = str(event["type"]) || "unknown";
