@@ -22,6 +22,7 @@ export type Database = {
           edited_fields: string[]
           ended_at: string | null
           ended_by: string | null
+          errors: Json
           estimated_cost: number | null
           fields: Json
           first_name: string | null
@@ -29,6 +30,7 @@ export type Database = {
           quotes: Json
           sections_completed: string[]
           started_at: string | null
+          tool_log: Json
         }
         Insert: {
           confidence?: Json
@@ -37,6 +39,7 @@ export type Database = {
           edited_fields?: string[]
           ended_at?: string | null
           ended_by?: string | null
+          errors?: Json
           estimated_cost?: number | null
           fields?: Json
           first_name?: string | null
@@ -44,6 +47,7 @@ export type Database = {
           quotes?: Json
           sections_completed?: string[]
           started_at?: string | null
+          tool_log?: Json
         }
         Update: {
           confidence?: Json
@@ -52,6 +56,7 @@ export type Database = {
           edited_fields?: string[]
           ended_at?: string | null
           ended_by?: string | null
+          errors?: Json
           estimated_cost?: number | null
           fields?: Json
           first_name?: string | null
@@ -59,6 +64,7 @@ export type Database = {
           quotes?: Json
           sections_completed?: string[]
           started_at?: string | null
+          tool_log?: Json
         }
         Relationships: []
       }

@@ -10,6 +10,7 @@ interface Props {
   connecting: boolean;
   onToggleMute: () => void;
   onFinishEarly: () => void;
+  warning?: string | null;
 }
 
 function formatClock(seconds: number) {
@@ -38,6 +39,7 @@ export function ConversationScreen({
   connecting,
   onToggleMute,
   onFinishEarly,
+  warning,
 }: Props) {
   const done = SECTIONS.filter((s) => sectionComplete(fields, s.fields)).length;
   const progress = Math.round((done / SECTIONS.length) * 100);
@@ -69,6 +71,12 @@ export function ConversationScreen({
           </span>
         </div>
       </div>
+
+      {warning ? (
+        <p role="status" className="mb-3 rounded-lg border border-terracotta/40 bg-peach px-4 py-3 text-sm text-ink">
+          {warning}
+        </p>
+      ) : null}
 
       <div className="flex-1 space-y-4 overflow-y-auto">
         {SECTIONS.map((section) => {

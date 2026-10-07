@@ -2,12 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { createLiveSession } from "@/lib/live.functions";
 import {
-  missingInSection,
+  applyRecordAnswers,
   missingRequired,
-  normaliseTool,
-  sectionOf,
-  validateField,
-  normaliseHandoffs,
+  type ErrorEntry,
+  type RecordInput,
+  type ToolLogEntry,
   type Confidence,
   type FieldKey,
   type OperatingMap,
@@ -18,6 +17,9 @@ import {
 const SILENCE_AFTER_FINISH_MS = 1500;
 const FINISH_FALLBACK_MS = 8000;
 const SPEAKING_LEVEL = 0.06;
+const UNCONFIRMED_WRAP_MS = 10000;
+const WATCHDOG_SECONDS = 120;
+const CLOSING_LINE = /next screen/i;
 
 export type VoiceStatus = "idle" | "connecting" | "live" | "ended" | "error";
 export type VoiceErrorKind = "mic" | "session" | "connection" | null;
@@ -26,17 +28,17 @@ export const HARD_CAP_SECONDS = 7 * 60;
 export const REQUIRED_ONLY_SECONDS = 5 * 60;
 export const FORCE_WRAP_SECONDS = 6 * 60 + 30;
 
-export type FinishReason = "complete" | "dropped" | "capped" | "early" | "voice_early";
+export type FinishReason =
+  | "complete"
+  | "unconfirmed"
+  | "dropped"
+  | "capped"
+  | "early"
+  | "voice_early";
 
 interface Options {
   firstName: string;
   onFinish: (reason: FinishReason) => void;
-}
-
-interface RecordArgs {
-  fields?: Record<string, unknown>;
-  confidence?: Record<string, "high" | "low">;
-  quotes?: Record<string, string>;
 }
 
 function rms(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>): number {
@@ -62,6 +64,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
   const [speaker, setSpeaker] = useState<"agent" | "person" | "idle">("idle");
+  const [toolLog, setToolLog] = useState<ToolLogEntry[]>([]);
+  const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [nothingRecordedWarning, setNothingRecordedWarning] = useState(false);
+  const recordedOkRef = useRef(false);
+  const startedAtMsRef = useRef(0);
+  const outputTranscriptRef = useRef("");
+  const closingHeardRef = useRef(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -137,84 +146,42 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     dc.send(JSON.stringify(payload));
   }, []);
 
-  const applyRecord = useCallback((args: RecordArgs) => {
-    const incoming = { ...(args.fields ?? {}) };
-    delete incoming["first_name"]; // first name comes from the start screen only
-    const captured: string[] = [];
-    const notes: string[] = [];
+  const secondsIn = () =>
+    startedAtMsRef.current ? Math.round((performance.now() - startedAtMsRef.current) / 1000) : 0;
 
-    // Validate everything first so a bad call changes nothing.
-    const cleaned: Record<string, unknown> = {};
-    for (const [key, raw] of Object.entries(incoming)) {
-      let value = raw;
-      if (key === "tools" && Array.isArray(raw)) {
-        value = (raw as unknown[])
-          .filter((t): t is string => typeof t === "string")
-          .map(normaliseTool);
+  const logError = useCallback((where: string, message: unknown) => {
+    const text =
+      typeof message === "string"
+        ? message
+        : message instanceof Error
+          ? message.message
+          : JSON.stringify(message ?? "unknown error");
+    // Strip anything that looks like a key or bearer token.
+    const safe = text.replace(/(sk-[A-Za-z0-9_-]{6,}|Bearer\s+\S+)/g, "[redacted]").slice(0, 500);
+    console.warn("[voice]", where, safe);
+    setErrors((prev) => [...prev, { at: secondsIn(), where, message: safe }]);
+  }, []);
+
+  const logTool = useCallback((entry: Omit<ToolLogEntry, "at">) => {
+    setToolLog((prev) => [...prev, { at: secondsIn(), ...entry }]);
+  }, []);
+
+  const applyRecord = useCallback(
+    (args: RecordInput) => {
+      const outcome = applyRecordAnswers(fieldsRef.current, args, firstName, currentSectionRef.current);
+      fieldsRef.current = outcome.next;
+      currentSectionRef.current = outcome.section;
+      setFields(outcome.next);
+      if (Object.keys(outcome.confidence).length) setConfidence((p) => ({ ...p, ...outcome.confidence }));
+      if (Object.keys(outcome.quotes).length) setQuotes((p) => ({ ...p, ...outcome.quotes }));
+      if (outcome.result.ok) {
+        recordedOkRef.current = true;
+        setNothingRecordedWarning(false);
       }
-      if (key === "handoffs") value = normaliseHandoffs(raw);
-      if (key === "rekey_pair" && Array.isArray(raw)) {
-        value = (raw as unknown[]).map((t) => (typeof t === "string" ? normaliseTool(t) : t));
-      }
-      const failure = validateField(key, value);
-      if (failure) {
-        return {
-          ok: false as const,
-          ...failure,
-          reason:
-            key === "rekey_pair"
-              ? "rekey_pair must be a two-item array of tool names, or null"
-              : failure.reason,
-        };
-      }
-      cleaned[key] = value;
-    }
-
-    const prev = fieldsRef.current;
-    const next: OperatingMap = { ...prev, first_name: firstName };
-    for (const [key, value] of Object.entries(cleaned)) {
-      const k = key as FieldKey;
-      if (k === "scores") {
-        next.scores = { ...(prev.scores ?? {}), ...(value as Record<string, number>) };
-      } else if (k === "tools") {
-        next.tools = [...new Set([...(next.tools ?? []), ...(value as string[])])];
-      } else {
-        (next as Record<string, unknown>)[k] = value;
-      }
-      captured.push(key);
-      const conf = args.confidence?.[key];
-      if (conf) setConfidence((p) => ({ ...p, [k]: conf }));
-      const quote = args.quotes?.[key];
-      if (quote) setQuotes((p) => ({ ...p, [key]: quote }));
-    }
-
-    // Any re-key tool not already in tools is added automatically.
-    if (Array.isArray(next.rekey_pair)) {
-      const tools = [...(next.tools ?? [])];
-      for (const t of next.rekey_pair) {
-        if (!tools.includes(t)) {
-          tools.push(t);
-          notes.push(`added ${t} to tools`);
-        }
-      }
-      next.tools = tools;
-    }
-
-    fieldsRef.current = next;
-    setFields(next);
-
-    const lastKey = captured[captured.length - 1];
-    const sec = lastKey ? sectionOf(lastKey) : undefined;
-    if (sec) currentSectionRef.current = sec;
-
-    return {
-      ok: true as const,
-      captured,
-      missing_in_section: missingInSection(next, currentSectionRef.current),
-      missing_required: missingRequired(next),
-      ...(notes.length ? { note: notes.join("; ") } : {}),
-    };
-  }, [firstName]);
+      return outcome.result;
+    },
+    [firstName],
+  );
 
   /** Steer the live voice directly (time notes, greeting). */
   const sendLiveNote = useCallback(
@@ -256,6 +223,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         } catch {
           /* default to complete */
         }
+        logTool({ tool: "finish_session", keys: ["reason"], ok: true, rejected: [] });
         endReasonRef.current = reason === "person_requested" ? "voice_early" : "complete";
         endingRef.current = true;
         sendToolResult(responseId, callId, { ok: true });
@@ -265,19 +233,37 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         return;
       }
       if (name !== "record_answers") {
+        logTool({ tool: String(name), keys: [], ok: false, rejected: [] });
         sendToolResult(responseId, callId, { ok: false, reason: `unknown function ${name}` });
         return;
       }
-      let parsed: RecordArgs = {};
+      let parsed: RecordInput = {};
       try {
-        parsed = JSON.parse(argsText || "{}") as RecordArgs;
+        parsed = JSON.parse(argsText || "{}") as RecordInput;
       } catch {
+        logTool({ tool: "record_answers", keys: [], ok: false, rejected: [] });
+        logError("record_answers", "arguments were not valid JSON");
         sendToolResult(responseId, callId, { ok: false, reason: "arguments were not valid JSON" });
         return;
       }
-      sendToolResult(responseId, callId, applyRecord(parsed));
+      const keys =
+        parsed && typeof parsed.fields === "object" && parsed.fields !== null ? Object.keys(parsed.fields) : [];
+      try {
+        const result = applyRecord(parsed);
+        logTool({ tool: "record_answers", keys, ok: result.ok, rejected: result.rejected });
+        sendToolResult(responseId, callId, result);
+      } catch (e) {
+        logError("record_answers handler", e);
+        logTool({ tool: "record_answers", keys, ok: false, rejected: [] });
+        sendToolResult(responseId, callId, {
+          ok: false,
+          captured: [],
+          rejected: [],
+          reason: "the app could not process this call",
+        });
+      }
     },
-    [applyRecord, sendToolResult],
+    [applyRecord, sendToolResult, logTool, logError],
   );
 
   const handleServerEvent = useCallback(
@@ -286,6 +272,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
 
       if (type === "session.started") {
         startedRef.current = true;
+        startedAtMsRef.current = performance.now();
         setStatus("live");
         sendLiveNote(
           "Greet the person now in English by first name, in one short sentence, then ask the opening question for section 1. Then pause and listen.",
@@ -297,7 +284,22 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         return;
       }
       if (type === "error") {
-        console.warn("live error", event["error"]);
+        const err = (event["error"] ?? {}) as Record<string, unknown>;
+        logError("live", (err["message"] as string | undefined) ?? err);
+        return;
+      }
+      if (type === "session.output_transcript.delta" && typeof event["delta"] === "string") {
+        outputTranscriptRef.current = (outputTranscriptRef.current + event["delta"]).slice(-400);
+        if (!closingHeardRef.current && CLOSING_LINE.test(outputTranscriptRef.current)) {
+          closingHeardRef.current = true;
+          // Stop listening so a "thank you" can't start another turn.
+          send({ type: "session.input_audio.mute", event_id: "closing_mute" });
+          window.setTimeout(() => {
+            if (finishedRef.current || endingRef.current) return;
+            logError("finish_session", "no finish_session within 10 seconds of the closing line");
+            finishRef.current("unconfirmed");
+          }, UNCONFIRMED_WRAP_MS);
+        }
         return;
       }
       if (type !== "response.event") return;
@@ -305,6 +307,18 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       const inner = (event["event"] ?? {}) as Record<string, unknown>;
       const innerType = inner["type"];
       const response = (inner["response"] ?? {}) as Record<string, unknown>;
+
+      if (innerType === "error" || innerType === "response.failed") {
+        const err = ((innerType === "error" ? inner["error"] : response["error"]) ?? inner) as Record<
+          string,
+          unknown
+        >;
+        logError(`delegated ${String(innerType)}`, (err["message"] as string | undefined) ?? err);
+        return;
+      }
+      if (innerType === "response.incomplete") {
+        logError("delegated response.incomplete", response["incomplete_details"] ?? "incomplete");
+      }
 
       if (innerType === "response.output_item.done") {
         const item = (inner["item"] ?? {}) as Record<string, unknown>;
@@ -331,7 +345,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         }
       }
     },
-    [runFunctionCall, send, sendLiveNote],
+    [runFunctionCall, send, sendLiveNote, logError],
   );
 
   const start = useCallback(async () => {
@@ -397,8 +411,8 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       dc.addEventListener("message", (e) => {
         try {
           handleServerEvent(JSON.parse(e.data as string) as Record<string, unknown>);
-        } catch {
-          /* ignore malformed event */
+        } catch (err) {
+          logError("event handler", err);
         }
       });
 
@@ -502,6 +516,10 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
             "Six and a half minutes have passed. Begin the wrap now and keep it brief. After it, tell the backend the interview is complete.",
           );
         }
+        if (next === WATCHDOG_SECONDS && !recordedOkRef.current) {
+          setNothingRecordedWarning(true);
+          setErrors((p) => [...p, { at: WATCHDOG_SECONDS, where: "watchdog", message: "no successful record_answers" }]);
+        }
         if (next >= HARD_CAP_SECONDS) finish("capped");
         return next;
       });
@@ -532,6 +550,9 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     muted,
     level,
     speaker,
+    toolLog,
+    errors,
+    nothingRecordedWarning,
     start,
     finish,
     toggleMute,

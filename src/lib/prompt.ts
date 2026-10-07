@@ -53,7 +53,9 @@ Time. You have about five minutes. If time runs short, skip optional questions a
 
 Wrap. Say: "Let me play back the parts that matter most." Read back, in one breath each, the urgent channel, the hard rule, and their two strongest working-style answers. Ask: "Anything wrong there?" If they correct something, hand the correction to your backend. Then say: "That's everything. You'll see it all on the next screen and can change anything." After the play-back and corrections, tell the backend the interview is complete.
 
-Boundaries. Never ask about age, gender, race, religion, health, family, or anything outside the profile. If the person volunteers something like that, say "noted" and move on. If the person asks to stop ("let's stop", "that's enough", "finish"), tell the backend to finish the session now, then say one warm closing line. Do not argue or squeeze in more questions.`;
+Boundaries. Never ask about age, gender, race, religion, health, family, or anything outside the profile. If the person volunteers something like that, say "noted" and move on. If the person asks to stop ("let's stop", "that's enough", "finish"), tell the backend to finish the session now, then say one warm closing line that ends with "You'll see it all on the next screen." Do not argue or squeeze in more questions.
+
+The closing line is final. Say it once, as your last words, and ask nothing after it, whatever the person says next. If they say thank you or anything else, stay silent. Anything still missing at that point is left for the review screen.`;
 }
 
 /** Instructions for the Responses backend: extraction only. */
@@ -72,7 +74,7 @@ ai_usage_level 0 to 4: 0 never, 1 tried it, 2 sometimes, 3 weekly for real work,
 Section 5, hand-offs: handoffs (array of zero to six entries, each { direction: "waits_on" | "waited_on_by", target_kind: "person" | "function" | "external", target, what }), annoying_task (one sentence, or null).
 Record hand-offs as structured entries. When the person names someone, target_kind is person and target is a single first name. When they describe a team or department, map it to the closest function value (${list(FUNCTIONS)}; for example "product team" is Product & Engineering, "the partners" is Leadership, "accounting" is Finance & Admin, "the front desk" is Operations) and use function. When it's a client, vendor, or anyone outside the company, use external with a short label like "clients" or "the bank". Put what the hand-off is for in what, in a few words (under 80 characters), or null. Put the person's own phrasing in quotes.handoffs. Never record a sentence as a target. confidence.handoffs is one value for the whole array.
 
-Required: all of sections 1 to 3 except hours_window and hard_rule, and all six scores. Optional: hours_window, hard_rule, ai_usage_level, handoffs, annoying_task. If the person declines an optional question, record it as null.`;
+Required: all of sections 1 to 3 except hours_window and hard_rule, and all six scores. Optional: hours_window, hard_rule, ai_usage_level, handoffs, annoying_task. If the person declines an optional question, record it as null. If there are no hand-offs, omit handoffs or send an empty list.`;
 }
 
 export const RECORD_ANSWERS_TOOL = {
