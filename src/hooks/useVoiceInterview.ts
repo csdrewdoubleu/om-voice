@@ -4,7 +4,7 @@ import { createLiveSession, recordFromTranscript, type RecordFromTranscriptResul
 import {
   applyRecordAnswers,
   missingRequired,
-  requiredKeyLabel,
+  statusNote,
   EVENT_LOG_CAP,
   type ErrorEntry,
   type EventLogEntry,
@@ -19,7 +19,11 @@ import {
 
 // ---- Settings ----
 const SILENCE_AFTER_CLOSING_MS = 1500;
-const FINAL_RECORD_TIMEOUT_MS = 8000;
+const FINAL_RECORD_TIMEOUT_MS = 15000;
+/** Interviewer quiet this long after speaking counts as the end of its turn. */
+const AGENT_TURN_END_MS = 700;
+/** Person stopped and interviewer silent this long: nudge the interviewer. */
+const STALL_NUDGE_MS = 4000;
 const RECORD_INTERVAL_SECONDS = 30;
 const SPEAKING_LEVEL = 0.06;
 const WATCHDOG_SECONDS = 120;
@@ -173,7 +177,10 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
   const recordInFlightRef = useRef<Promise<boolean> | null>(null);
   const recordSeqRef = useRef(0);
   const lastMissingNoteRef = useRef<string | null>(null);
-  const allInSentRef = useRef(false);
+  const pendingNotesRef = useRef<{ status?: { text: string; logNote: string }; time?: { text: string; logNote: string } }>({});
+  const turnRef = useRef<TurnState>({ lastAgent: 0, lastPerson: 0, agentTurnOpen: false, personTurnOpen: false, nudged: false });
+  const lastOutputDeltaRef = useRef(-1e9);
+  const lastInputDeltaRef = useRef(-1e9);
   // Backend responses that received tool results and need a continue.
   const needsContinueRef = useRef<Set<string>>(new Set());
   const callResponseRef = useRef<Map<string, string>>(new Map());
@@ -326,21 +333,51 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     [firstName],
   );
 
-  /** Tell the interviewer what is still required, only when the list changes. */
+  /**
+   * Queue a note for the interviewer. Notes are held until the interviewer
+   * finishes a spoken turn; a newer note of the same kind replaces a waiting one.
+   */
+  const queueNote = (kind: "status" | "time", text: string, logNote: string) => {
+    if (endingRef.current || finishedRef.current) return;
+    if (pendingNotesRef.current[kind]) logAppEvent("app.note.replaced", kind);
+    pendingNotesRef.current[kind] = { text, logNote };
+    logAppEvent("app.note.held", logNote);
+  };
+
+  /** Deliver waiting notes as one instruction. Only called at a safe moment. */
+  const flushNotes = (why: string) => {
+    const { status: s, time: t } = pendingNotesRef.current;
+    if (!s && !t) return;
+    pendingNotesRef.current = {};
+    if (endingRef.current || finishedRef.current) return;
+    sendLiveNoteRef.current([s?.text, t?.text].filter(Boolean).join("\n"));
+    logAppEvent("app.note", `${[s?.logNote, t?.logNote].filter(Boolean).join("; ")} (${why})`);
+  };
+  const flushNotesRef = useRef(flushNotes);
+  flushNotesRef.current = flushNotes;
+  const queueNoteRef = useRef(queueNote);
+  queueNoteRef.current = queueNote;
+
+  /** Stall guard: the person stopped and the interviewer has said nothing for a while. */
+  const nudge = () => {
+    if (endingRef.current || finishedRef.current) return;
+    const { status: s, time: t } = pendingNotesRef.current;
+    pendingNotesRef.current = {};
+    const parts = [s?.text, t?.text, "The person has finished speaking. Respond to them now."].filter(Boolean);
+    sendLiveNoteRef.current(parts.join("\n"));
+    logAppEvent("app.nudge", s || t ? "with held notes" : "");
+  };
+  const nudgeRef = useRef(nudge);
+  nudgeRef.current = nudge;
+
+  /** After each save, queue a status note if its text changed. */
   const noteMissing = () => {
     if (endingRef.current || finishedRef.current) return;
+    const text = statusNote(fieldsRef.current);
+    if (text === lastMissingNoteRef.current) return;
+    lastMissingNoteRef.current = text;
     const missing = missingRequired(fieldsRef.current);
-    const key = missing.join(",");
-    if (key === lastMissingNoteRef.current) return;
-    lastMissingNoteRef.current = key;
-    if (missing.length) {
-      sendLiveNoteRef.current(`Still needed: ${missing.map(requiredKeyLabel).join(", ")}.`);
-      logAppEvent("app.note", `still needed: ${missing.length}`);
-    } else if (!allInSentRef.current) {
-      allInSentRef.current = true;
-      sendLiveNoteRef.current("All required answers are in.");
-      logAppEvent("app.note", "all required answers are in");
-    }
+    queueNote("status", text, missing.length ? `still needed: ${missing.length}` : "all required in + play-back");
   };
 
   /** Merge one record_answers payload, from either source. */
@@ -559,11 +596,13 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         if (event["delta"].trim() && !endingRef.current) {
           appendTranscript("person", event["delta"]);
           personSpokeRef.current = true;
+          lastInputDeltaRef.current = performance.now();
         }
         return;
       }
       if (type === "session.output_transcript.delta" && typeof event["delta"] === "string") {
         appendTranscript("interviewer", event["delta"]);
+        lastOutputDeltaRef.current = performance.now();
         outputTranscriptRef.current = (outputTranscriptRef.current + event["delta"]).slice(-400);
         if (!closingHeardRef.current && CLOSING_LINE.test(outputTranscriptRef.current)) {
           closingHeardRef.current = true;
@@ -744,6 +783,18 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
         const personLevel = micA ? rms(micA, buffer) : 0;
         const now = performance.now();
         if (agentLevel > SPEAKING_LEVEL) lastAgentSoundRef.current = now;
+        if (startedRef.current && !endingRef.current) {
+          const step = turnStep(
+            turnRef.current,
+            now,
+            agentLevel > SPEAKING_LEVEL || now - lastOutputDeltaRef.current < 150,
+            personLevel > SPEAKING_LEVEL || now - lastInputDeltaRef.current < 150,
+            AGENT_TURN_END_MS,
+            STALL_NUDGE_MS,
+          );
+          if (step.flush) flushNotesRef.current("after interviewer turn");
+          if (step.nudge) nudgeRef.current();
+        }
         const agentActive = now - lastAgentSoundRef.current < 400;
         if (agentActive) {
           setSpeaker("agent");
@@ -776,14 +827,18 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
       if (next === REQUIRED_ONLY_SECONDS) {
         const missing = missingRequired(fieldsRef.current);
         if (missing.length) {
-          sendLiveNote(
+          queueNoteRef.current(
+            "time",
             `Five minutes have passed. Skip every remaining optional question. Ask only for these required fields, one per turn, then wrap: ${missing.join(", ")}.`,
+            "time: 5:00",
           );
         }
       }
       if (next === FORCE_WRAP_SECONDS) {
-        sendLiveNote(
+        queueNoteRef.current(
+          "time",
           "Six and a half minutes have passed. Begin the wrap now and keep it brief.",
+          "time: 6:30",
         );
       }
       if (next === WATCHDOG_SECONDS && !recordedOkRef.current && !watchdogLoggedRef.current) {
@@ -834,4 +889,55 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     finish: (reason: FinishReason) => void endCallRef.current(reason),
     toggleMute,
   };
+}
+
+/**
+ * Turn tracking for note delivery and the stall guard. Pure, so it can be
+ * replayed against recorded timings. Returns what to do at this instant.
+ */
+export interface TurnState {
+  lastAgent: number;
+  lastPerson: number;
+  agentTurnOpen: boolean;
+  personTurnOpen: boolean;
+  nudged: boolean;
+}
+export function turnStep(
+  s: TurnState,
+  now: number,
+  agentSound: boolean,
+  personSound: boolean,
+  agentTurnEndMs = 700,
+  stallMs = 4000,
+): { flush: boolean; nudge: boolean } {
+  if (agentSound) {
+    s.lastAgent = now;
+    s.agentTurnOpen = true;
+    s.personTurnOpen = false;
+  }
+  if (personSound) {
+    s.lastPerson = now;
+    s.personTurnOpen = true;
+    s.nudged = false;
+  }
+  let flush = false;
+  let nudge = false;
+  const personQuiet = now - s.lastPerson >= 300;
+  // Safe moment: the interviewer just finished a spoken turn and the person isn't talking.
+  if (s.agentTurnOpen && now - s.lastAgent >= agentTurnEndMs && personQuiet) {
+    s.agentTurnOpen = false;
+    flush = true;
+  }
+  // Stall: person stopped, interviewer has said nothing since, for stallMs.
+  if (
+    s.personTurnOpen &&
+    !s.nudged &&
+    !s.agentTurnOpen &&
+    now - s.lastPerson >= stallMs &&
+    now - s.lastAgent >= stallMs
+  ) {
+    s.nudged = true;
+    nudge = true;
+  }
+  return { flush, nudge };
 }
