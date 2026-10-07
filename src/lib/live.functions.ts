@@ -131,8 +131,8 @@ export interface TranscriptTurn {
 export interface RecordFromTranscriptResult {
   ok: boolean;
   error?: string;
-  /** Arguments of the backend's record_answers call. */
-  args?: { fields?: Record<string, unknown>; confidence?: Record<string, unknown>; quotes?: Record<string, unknown> };
+  /** Arguments of the backend's record_answers call, as JSON text. */
+  argsJson?: string;
   usage?: { input_tokens: number; output_tokens: number };
   status?: number;
 }
@@ -185,9 +185,5 @@ export const recordFromTranscript = createServerFn({ method: "POST" })
     };
     const call = payload.output?.find((o) => o.type === "function_call" && o.name === "record_answers");
     if (!call?.arguments) return { ok: false, usage, status: 200, error: "no record_answers call" };
-    try {
-      return { ok: true, usage, status: 200, args: JSON.parse(call.arguments) };
-    } catch {
-      return { ok: false, usage, status: 200, error: "record_answers arguments were not valid JSON" };
-    }
+    return { ok: true, usage, status: 200, argsJson: call.arguments };
   });

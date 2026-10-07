@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { createLiveSession, recordFromTranscript, type TranscriptTurn } from "@/lib/live.functions";
+import { createLiveSession, recordFromTranscript, type RecordFromTranscriptResult, type TranscriptTurn } from "@/lib/live.functions";
 import {
   applyRecordAnswers,
   missingRequired,
@@ -378,19 +378,26 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
     logAppEvent("app.record.request", `#${n} ${kind}, ${transcript.length} turns`);
     const promise = (async () => {
       try {
-        const r = await recordFn({ data: { transcript } });
+        const r: RecordFromTranscriptResult = await recordFn({ data: { transcript } });
         const ms = Math.round(performance.now() - t0);
         const tokens = r.usage ? `, in ${r.usage.input_tokens} out ${r.usage.output_tokens} tokens` : "";
-        if (!r.ok || !r.args) {
-          logAppEvent("app.record.failed", `#${n} ${ms}ms ${safeText(r.error ?? "failed")}${tokens}`);
-          logError("app record", r.error ?? "failed");
+        let args: RecordInput | null = null;
+        try {
+          args = r.argsJson ? (JSON.parse(r.argsJson) as RecordInput) : null;
+        } catch {
+          args = null;
+        }
+        if (!r.ok || !args) {
+          const why = r.error ?? "arguments were not valid JSON";
+          logAppEvent("app.record.failed", `#${n} ${ms}ms ${safeText(why)}${tokens}`);
+          logError("app record", why);
           return false;
         }
         if (finishedRef.current) {
           logAppEvent("app.record.late", `#${n} ${ms}ms arrived after the call closed`);
           return false;
         }
-        const result = handleRecordArgs(r.args as RecordInput, "app");
+        const result = handleRecordArgs(args, "app");
         logAppEvent(
           "app.record.done",
           `#${n} ${ms}ms captured ${result?.captured.length ?? 0} rejected ${result?.rejected.length ?? 0}${tokens}`,
