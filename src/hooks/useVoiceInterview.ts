@@ -484,6 +484,7 @@ export function useVoiceInterview({ firstName, onFinish }: Options) {
 
     const fail = (kind: VoiceErrorKind, message: string) => {
       teardown();
+      flushEventLog();
       setStatus("error");
       setErrorKind(kind);
       setErrorMessage(message);
