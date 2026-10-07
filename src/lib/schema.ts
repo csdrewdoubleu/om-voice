@@ -443,6 +443,8 @@ export interface ToolLogEntry {
   keys: string[];
   ok: boolean;
   rejected: ValidationFailure[];
+  /** Who asked for the recording: the app's timed request, or the interviewer handing off. */
+  source?: "app" | "interviewer";
 }
 
 export interface ErrorEntry {
@@ -634,15 +636,34 @@ export function fullKeyed<T>(obj: Partial<Record<string, T>>): Record<string, T 
   return Object.fromEntries(ALL_FIELDS.map((k) => [k, obj[k] ?? null]));
 }
 
+/**
+ * Sections 1 to 4 are complete when all their required fields are captured.
+ * Section 5 is complete when a hand-off or the annoying task is captured, or the call ended by the closing line.
+ */
+export function sectionIsComplete(map: OperatingMap, sectionId: string, closedByWrap: boolean): boolean {
+  if (sectionId === "handoffs") {
+    return (
+      (Array.isArray(map.handoffs) && map.handoffs.length > 0) ||
+      (typeof map.annoying_task === "string" && map.annoying_task.trim() !== "") ||
+      closedByWrap
+    );
+  }
+  const section = SECTIONS.find((s) => s.id === sectionId);
+  if (!section) return false;
+  return sectionKeys(section)
+    .filter((k) => REQUIRED_KEYS.includes(k))
+    .every((k) => isCaptured(map, k));
+}
+
 export function sectionsCompleted(map: OperatingMap, endedBy: EndedBy): string[] {
-  const touched = SECTIONS.map((sec) => sectionKeys(sec).some((k) => isCaptured(map, k)));
-  return SECTIONS.filter((sec, i) => {
-    const keys = sectionKeys(sec);
-    if (keys.every((k) => isCaptured(map, k))) return true;
-    const reqDone = keys.filter((k) => REQUIRED_KEYS.includes(k)).every((k) => isCaptured(map, k));
-    if (!reqDone) return false;
-    const later = touched.slice(i + 1).some(Boolean);
-    const isLast = i === SECTIONS.length - 1;
-    return later || (isLast && endedBy === "wrap" && touched[i]);
-  }).map((s) => s.label);
+  return SECTIONS.filter((sec) => sectionIsComplete(map, sec.id, endedBy === "wrap")).map((s) => s.label);
+}
+
+/** Plain names for required keys, for the "Still needed" note. */
+export function requiredKeyLabel(key: string): string {
+  if (key.startsWith("scores.")) {
+    const d = key.slice(7) as ScoreKey;
+    return (SCORE_POLES[d]?.label ?? d).toLowerCase();
+  }
+  return (FIELD_LABELS[key as FieldKey] ?? key).toLowerCase();
 }

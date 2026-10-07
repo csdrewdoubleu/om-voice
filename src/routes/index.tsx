@@ -314,6 +314,7 @@ function Index() {
         connecting={voice.status === "connecting"}
         onToggleMute={voice.toggleMute}
         onFinishEarly={() => voice.finish("early")}
+        saving={voice.saving}
         warning={
           voice.nothingRecordedWarning
             ? "Nothing has been recorded yet. You can finish early and fill it in by hand."

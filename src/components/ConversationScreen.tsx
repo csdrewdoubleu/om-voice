@@ -1,4 +1,4 @@
-import { SECTIONS, formatChip, formatHandoff, type FieldKey, type Confidence, type OperatingMap } from "@/lib/schema";
+import { SECTIONS, formatChip, formatHandoff, sectionIsComplete, type FieldKey, type Confidence, type OperatingMap } from "@/lib/schema";
 
 interface Props {
   fields: OperatingMap;
@@ -11,22 +11,13 @@ interface Props {
   onToggleMute: () => void;
   onFinishEarly: () => void;
   warning?: string | null;
+  saving?: boolean;
 }
 
 function formatClock(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function sectionComplete(fields: OperatingMap, keys: (keyof OperatingMap)[]) {
-  return keys.every((k) => {
-    const v = fields[k];
-    if (v === undefined || v === null) return false;
-    if (Array.isArray(v)) return v.length > 0;
-    if (k === "scores") return Object.keys(v as object).length >= 6;
-    return true;
-  });
 }
 
 export function ConversationScreen({
@@ -40,8 +31,9 @@ export function ConversationScreen({
   onToggleMute,
   onFinishEarly,
   warning,
+  saving = false,
 }: Props) {
-  const done = SECTIONS.filter((s) => sectionComplete(fields, s.fields)).length;
+  const done = SECTIONS.filter((s) => sectionIsComplete(fields, s.id, false)).length;
   const progress = Math.round((done / SECTIONS.length) * 100);
 
   const ringColor =
@@ -72,7 +64,13 @@ export function ConversationScreen({
         </div>
       </div>
 
-      {warning ? (
+      {saving ? (
+        <p role="status" className="mb-3 rounded-lg border border-border bg-cream-deep px-4 py-3 text-sm text-ink">
+          Saving your answers
+        </p>
+      ) : null}
+
+      {warning && !saving ? (
         <p role="status" className="mb-3 rounded-lg border border-terracotta/40 bg-peach px-4 py-3 text-sm text-ink">
           {warning}
         </p>
@@ -125,6 +123,7 @@ export function ConversationScreen({
         <button
           type="button"
           onClick={onFinishEarly}
+          disabled={saving}
           className="btn-base btn-outline flex-1 py-2.5 text-sm"
         >
           Finish early
