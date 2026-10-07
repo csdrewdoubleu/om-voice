@@ -581,7 +581,35 @@ export interface SessionExport {
   estimated_cost_note: string;
   tool_log: ToolLogEntry[];
   errors: ErrorEntry[];
+  event_log: EventLogEntry[];
+  event_log_dropped: number;
+  session_config: SessionConfigSummary | null;
 }
+
+/** One received session event. Never holds spoken words, audio, or keys. */
+export interface EventLogEntry {
+  at: number;
+  type: string;
+  note: string;
+}
+
+/** What the server sent when creating the session, without keys or prompt text. */
+export interface SessionConfigSummary {
+  live_model: string;
+  voice: string;
+  delegation_present: boolean;
+  delegation_type: string | null;
+  backend_model: string | null;
+  tools: string[];
+  tool_choice: string | null;
+  live_prompt_chars: number;
+  backend_prompt_chars: number;
+  response_status: number | null;
+  accepted: boolean;
+  session_id: string | null;
+}
+
+export const EVENT_LOG_CAP = 500;
 
 /** Voice session time only; backend tokens excluded. */
 export function estimateCost(durationSeconds: number): number {

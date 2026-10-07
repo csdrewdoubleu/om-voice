@@ -24,11 +24,14 @@ export type Database = {
           ended_by: string | null
           errors: Json
           estimated_cost: number | null
+          event_log: Json
+          event_log_dropped: number
           fields: Json
           first_name: string | null
           id: string
           quotes: Json
           sections_completed: string[]
+          session_config: Json | null
           started_at: string | null
           tool_log: Json
         }
@@ -41,11 +44,14 @@ export type Database = {
           ended_by?: string | null
           errors?: Json
           estimated_cost?: number | null
+          event_log?: Json
+          event_log_dropped?: number
           fields?: Json
           first_name?: string | null
           id?: string
           quotes?: Json
           sections_completed?: string[]
+          session_config?: Json | null
           started_at?: string | null
           tool_log?: Json
         }
@@ -58,11 +64,14 @@ export type Database = {
           ended_by?: string | null
           errors?: Json
           estimated_cost?: number | null
+          event_log?: Json
+          event_log_dropped?: number
           fields?: Json
           first_name?: string | null
           id?: string
           quotes?: Json
           sections_completed?: string[]
+          session_config?: Json | null
           started_at?: string | null
           tool_log?: Json
         }

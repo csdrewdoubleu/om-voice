@@ -29,6 +29,13 @@
       "when": 1791339503042,
       "tag": "0003_voice_sessions_logs",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791343626876,
+      "tag": "0004_voice_sessions_event_log",
+      "breakpoints": true
     }
   ]
 }
