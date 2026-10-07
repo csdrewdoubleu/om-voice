@@ -19,6 +19,8 @@ import {
   type SessionExport,
   type ToolLogEntry,
   type ErrorEntry,
+  type EventLogEntry,
+  type SessionConfigSummary,
 } from "@/lib/schema";
 
 const REASON_TO_ENDED_BY: Record<string, EndedBy> = {
@@ -69,6 +71,9 @@ interface StoredSession {
   endedBy?: EndedBy;
   toolLog?: ToolLogEntry[];
   errors?: ErrorEntry[];
+  eventLog?: EventLogEntry[];
+  eventLogDropped?: number;
+  sessionConfig?: SessionConfigSummary | null;
 }
 
 function Index() {
@@ -88,6 +93,9 @@ function Index() {
   const [endedBy, setEndedBy] = useState<EndedBy>("dropped");
   const [toolLog, setToolLog] = useState<ToolLogEntry[]>([]);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
+  const [eventLogDropped, setEventLogDropped] = useState(0);
+  const [sessionConfig, setSessionConfig] = useState<SessionConfigSummary | null>(null);
 
   const handleFinish = useCallback(
     (reason: "complete" | "unconfirmed" | "dropped" | "capped" | "early" | "voice_early") => {
@@ -119,6 +127,9 @@ function Index() {
       setEndedBy(stored.endedBy ?? "dropped");
       setToolLog(stored.toolLog ?? []);
       setErrors(stored.errors ?? []);
+      setEventLog(stored.eventLog ?? []);
+      setEventLogDropped(stored.eventLogDropped ?? 0);
+      setSessionConfig(stored.sessionConfig ?? null);
       setScreen("review");
     } catch {
       sessionStorage.removeItem(STORAGE_KEY);
@@ -138,9 +149,12 @@ function Index() {
       sessionId,
       toolLog: voice.toolLog,
       errors: voice.errors,
+      eventLog: voice.eventLog,
+      eventLogDropped: voice.eventLogDropped,
+      sessionConfig: voice.sessionConfig,
     };
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed, voice.toolLog, voice.errors, sessionId]);
+  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed, voice.toolLog, voice.errors, voice.eventLog, voice.eventLogDropped, voice.sessionConfig, sessionId]);
 
   // Persist the end details once in review so a refresh keeps them.
   useEffect(() => {
@@ -157,9 +171,12 @@ function Index() {
       endedBy,
       toolLog,
       errors,
+      eventLog,
+      eventLogDropped,
+      sessionConfig,
     };
     if (Object.keys(reviewFields).length) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  }, [screen, firstName, reviewFields, reviewConfidence, reviewQuotes, durationSeconds, sessionId, endedBy, toolLog, errors]);
+  }, [screen, firstName, reviewFields, reviewConfidence, reviewQuotes, durationSeconds, sessionId, endedBy, toolLog, errors, eventLog, eventLogDropped, sessionConfig]);
 
   // Carry the live capture into review when the call ends.
   useEffect(() => {
@@ -170,6 +187,9 @@ function Index() {
     setDurationSeconds((prev) => prev || voice.elapsed);
     setToolLog((prev) => (prev.length ? prev : voice.toolLog));
     setErrors((prev) => (prev.length ? prev : voice.errors));
+    setEventLog((prev) => (prev.length ? prev : voice.eventLog));
+    setEventLogDropped((prev) => prev || voice.eventLogDropped);
+    setSessionConfig((prev) => prev ?? voice.sessionConfig);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
@@ -227,6 +247,9 @@ function Index() {
     estimated_cost_note: "session time only; backend tokens excluded",
     tool_log: toolLog,
     errors,
+    event_log: eventLog,
+    event_log_dropped: eventLogDropped,
+    session_config: sessionConfig,
   });
 
   const handleDownload = () => {
@@ -257,6 +280,9 @@ function Index() {
       estimated_cost: x.estimated_cost,
       tool_log: x.tool_log,
       errors: x.errors,
+      event_log: x.event_log,
+      event_log_dropped: x.event_log_dropped,
+      session_config: x.session_config,
     } as never);
     setSaving(false);
     if (error) {
