@@ -10,6 +10,7 @@ interface Props {
   connecting: boolean;
   onToggleMute: () => void;
   onFinishEarly: () => void;
+  warning?: string | null;
 }
 
 function formatClock(seconds: number) {
@@ -38,6 +39,7 @@ export function ConversationScreen({
   connecting,
   onToggleMute,
   onFinishEarly,
+  warning,
 }: Props) {
   const done = SECTIONS.filter((s) => sectionComplete(fields, s.fields)).length;
   const progress = Math.round((done / SECTIONS.length) * 100);

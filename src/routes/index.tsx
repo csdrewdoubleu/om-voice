@@ -17,10 +17,13 @@ import {
   type OperatingMap,
   type Quotes,
   type SessionExport,
+  type ToolLogEntry,
+  type ErrorEntry,
 } from "@/lib/schema";
 
 const REASON_TO_ENDED_BY: Record<string, EndedBy> = {
   complete: "wrap",
+  unconfirmed: "wrap_unconfirmed",
   early: "finish_early",
   voice_early: "finish_early_voice",
   capped: "cap",
@@ -64,6 +67,8 @@ interface StoredSession {
   sessionId?: string;
   endedAt?: number;
   endedBy?: EndedBy;
+  toolLog?: ToolLogEntry[];
+  errors?: ErrorEntry[];
 }
 
 function Index() {
@@ -81,9 +86,11 @@ function Index() {
   const endedAtRef = useRef<number | null>(null);
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
   const [endedBy, setEndedBy] = useState<EndedBy>("dropped");
+  const [toolLog, setToolLog] = useState<ToolLogEntry[]>([]);
+  const [errors, setErrors] = useState<ErrorEntry[]>([]);
 
   const handleFinish = useCallback(
-    (reason: "complete" | "dropped" | "capped" | "early" | "voice_early") => {
+    (reason: "complete" | "unconfirmed" | "dropped" | "capped" | "early" | "voice_early") => {
       endedAtRef.current = Date.now();
       setEndedBy(REASON_TO_ENDED_BY[reason] ?? "dropped");
       setBanner(reason === "dropped" ? "The call dropped; here's what we got." : null);
@@ -110,6 +117,8 @@ function Index() {
       endedAtRef.current = stored.endedAt ?? Date.now();
       if (stored.sessionId) setSessionId(stored.sessionId);
       setEndedBy(stored.endedBy ?? "dropped");
+      setToolLog(stored.toolLog ?? []);
+      setErrors(stored.errors ?? []);
       setScreen("review");
     } catch {
       sessionStorage.removeItem(STORAGE_KEY);
@@ -127,9 +136,11 @@ function Index() {
       startedAt: startedAtRef.current,
       durationSeconds: voice.elapsed,
       sessionId,
+      toolLog: voice.toolLog,
+      errors: voice.errors,
     };
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed, sessionId]);
+  }, [screen, firstName, voice.fields, voice.confidence, voice.quotes, voice.elapsed, voice.toolLog, voice.errors, sessionId]);
 
   // Persist the end details once in review so a refresh keeps them.
   useEffect(() => {
@@ -144,9 +155,11 @@ function Index() {
       sessionId,
       endedAt: endedAtRef.current ?? Date.now(),
       endedBy,
+      toolLog,
+      errors,
     };
     if (Object.keys(reviewFields).length) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-  }, [screen, firstName, reviewFields, reviewConfidence, reviewQuotes, durationSeconds, sessionId, endedBy]);
+  }, [screen, firstName, reviewFields, reviewConfidence, reviewQuotes, durationSeconds, sessionId, endedBy, toolLog, errors]);
 
   // Carry the live capture into review when the call ends.
   useEffect(() => {
@@ -155,6 +168,8 @@ function Index() {
     setReviewConfidence((prev) => (Object.keys(prev).length ? prev : voice.confidence));
     setReviewQuotes((prev) => (Object.keys(prev).length ? prev : voice.quotes));
     setDurationSeconds((prev) => prev || voice.elapsed);
+    setToolLog((prev) => (prev.length ? prev : voice.toolLog));
+    setErrors((prev) => (prev.length ? prev : voice.errors));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen]);
 
@@ -210,6 +225,8 @@ function Index() {
     sections_completed: sectionsCompleted(reviewFields, endedBy),
     estimated_cost: estimateCost(durationSeconds),
     estimated_cost_note: "session time only; backend tokens excluded",
+    tool_log: toolLog,
+    errors,
   });
 
   const handleDownload = () => {
@@ -238,6 +255,8 @@ function Index() {
       edited_fields: x.edited_fields,
       sections_completed: x.sections_completed,
       estimated_cost: x.estimated_cost,
+      tool_log: x.tool_log,
+      errors: x.errors,
     } as never);
     setSaving(false);
     if (error) {
@@ -269,6 +288,11 @@ function Index() {
         connecting={voice.status === "connecting"}
         onToggleMute={voice.toggleMute}
         onFinishEarly={() => voice.finish("early")}
+        warning={
+          voice.nothingRecordedWarning
+            ? "Nothing has been recorded yet. You can finish early and fill it in by hand."
+            : null
+        }
       />
     );
   }
@@ -281,6 +305,17 @@ function Index() {
         quotes={reviewQuotes}
         edited={edited}
         banner={banner}
+        emptyNotice={
+          Object.entries(reviewFields).some(
+            ([k, v]) =>
+              k !== "first_name" &&
+              v !== undefined &&
+              !(Array.isArray(v) && v.length === 0) &&
+              !(k === "scores" && typeof v === "object" && v && Object.keys(v).length === 0),
+          )
+            ? null
+            : "The call did not record anything. The form below is empty."
+        }
         saving={saving}
         onChange={handleChange}
         onSave={handleSave}

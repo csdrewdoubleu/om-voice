@@ -32,6 +32,7 @@ interface Props {
   quotes: Quotes;
   edited: string[];
   banner?: string | null;
+  emptyNotice?: string | null;
   saving: boolean;
   onChange: (key: FieldKey, value: unknown) => void;
   onSave: () => void;
@@ -186,6 +187,7 @@ export function ReviewScreen({
   quotes,
   edited,
   banner,
+  emptyNotice,
   saving,
   onChange,
   onSave,
