@@ -376,6 +376,12 @@ export function ReviewScreen({
       <div className="label-mono">review</div>
       <h1 className="mt-2 text-3xl leading-tight text-ink">Check your operating map</h1>
 
+      {emptyNotice ? (
+        <p className="mt-4 rounded-lg border border-terracotta/40 bg-peach px-4 py-3 text-sm text-ink">
+          {emptyNotice}
+        </p>
+      ) : null}
+
       {banner ? (
         <p className="mt-4 rounded-lg border border-terracotta/40 bg-peach px-4 py-3 text-sm text-ink">
           {banner}

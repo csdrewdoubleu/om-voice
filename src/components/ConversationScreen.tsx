@@ -72,6 +72,12 @@ export function ConversationScreen({
         </div>
       </div>
 
+      {warning ? (
+        <p role="status" className="mb-3 rounded-lg border border-terracotta/40 bg-peach px-4 py-3 text-sm text-ink">
+          {warning}
+        </p>
+      ) : null}
+
       <div className="flex-1 space-y-4 overflow-y-auto">
         {SECTIONS.map((section) => {
           const chips = section.fields
